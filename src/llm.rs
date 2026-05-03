@@ -281,6 +281,65 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
     Ok(stored)
 }
 
+pub fn normalize_usage(usage: Option<Value>) -> Option<Value> {
+    let usage = usage?;
+    if usage.is_null() {
+        return None;
+    }
+
+    let prompt = first_i64(
+        &usage,
+        &[
+            &["promptTokens"],
+            &["prompt_tokens"],
+            &["input_tokens"],
+            &["promptTokenCount"],
+            &["usageMetadata", "promptTokenCount"],
+        ],
+    )
+    .unwrap_or(0);
+    let cached = first_i64(
+        &usage,
+        &[
+            &["cachedTokens"],
+            &["prompt_tokens_details", "cached_tokens"],
+            &["cache_read_input_tokens"],
+            &["cachedContentTokenCount"],
+            &["usageMetadata", "cachedContentTokenCount"],
+        ],
+    )
+    .unwrap_or(0);
+    let explicit_total = first_i64(
+        &usage,
+        &[
+            &["totalTokens"],
+            &["total_tokens"],
+            &["totalTokenCount"],
+            &["usageMetadata", "totalTokenCount"],
+        ],
+    );
+    let completion = first_i64(
+        &usage,
+        &[
+            &["completionTokens"],
+            &["completion_tokens"],
+            &["output_tokens"],
+            &["candidatesTokenCount"],
+            &["usageMetadata", "candidatesTokenCount"],
+        ],
+    )
+    .or_else(|| explicit_total.map(|total| total.saturating_sub(prompt).max(0)))
+    .unwrap_or(0);
+    let total = explicit_total.unwrap_or_else(|| prompt.saturating_add(completion));
+
+    Some(json!({
+        "promptTokens": prompt.max(0),
+        "completionTokens": completion.max(0),
+        "cachedTokens": cached.max(0),
+        "totalTokens": total.max(0),
+    }))
+}
+
 pub async fn generate_title(
     state: &AppState,
     account_id: &str,
@@ -1262,6 +1321,26 @@ fn part_type(part: &Value) -> String {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
+}
+
+fn first_i64(value: &Value, paths: &[&[&str]]) -> Option<i64> {
+    paths.iter().find_map(|path| value_at_path(value, path).and_then(value_to_i64))
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_f64().map(|value| value.round() as i64))
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse::<i64>().ok()))
 }
 
 fn normalize_provider_type(provider: &Value) -> String {

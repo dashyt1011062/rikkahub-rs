@@ -412,7 +412,7 @@ async fn upsert_assistant_message(
         let node_id = db::random_id();
         let mut message = db::new_message("ASSISTANT", parts, result.model_id, finished);
         if finished {
-            message.usage = result.usage;
+            message.usage = llm::normalize_usage(result.usage);
         }
         conversation.messages.push(MessageNodeDto {
             id: node_id.clone(),
@@ -430,7 +430,7 @@ async fn upsert_assistant_message(
             message.parts = parts;
             if finished {
                 message.finished_at = Some(db::now_iso());
-                message.usage = result.usage;
+                message.usage = llm::normalize_usage(result.usage);
             }
             message.model_id = result.model_id.or(message.model_id);
             node.messages = vec![message];
