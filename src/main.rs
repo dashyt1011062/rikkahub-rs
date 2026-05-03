@@ -14,9 +14,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
+use axum::http::header::CACHE_CONTROL;
+use axum::http::HeaderValue;
 use axum::Router;
 use reqwest::Client;
 use tokio::sync::Semaphore;
+use tower_http::set_header::SetResponseHeader;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -77,7 +80,11 @@ async fn main() -> AppResult<()> {
 fn build_app(state: AppState) -> Router {
     let web_root = state.config.web_ui_dir.clone();
     let index = web_root.join("index.html");
-    let static_service = ServeDir::new(web_root).fallback(ServeFile::new(index));
+    let static_service = SetResponseHeader::overriding(
+        ServeDir::new(web_root).fallback(ServeFile::new(index)),
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+    );
     let body_limit = state
         .config
         .upload_max_bytes
