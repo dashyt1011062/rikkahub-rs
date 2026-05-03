@@ -884,7 +884,7 @@ async fn openai_user_content_for_message(state: &AppState, account_id: &str, mes
                 }
             }
             "image" => {
-                if let Some(url) = resolve_part_image_url(state, account_id, part).await? {
+                if let Some(url) = resolve_part_image_reference(state, account_id, part).await? {
                     blocks.push(json!({ "type": "image_url", "image_url": { "url": url } }));
                 }
             }
@@ -924,6 +924,18 @@ async fn resolve_part_image_url(state: &AppState, account_id: &str, part: &Value
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string))
+}
+
+async fn resolve_part_image_reference(state: &AppState, account_id: &str, part: &Value) -> AppResult<Option<String>> {
+    let Some(url) = resolve_part_image_url(state, account_id, part).await? else {
+        return Ok(None);
+    };
+    match image_bytes_from_url(state, &url).await {
+        Ok(Some((bytes, mime))) if bytes.len() <= IMAGE_REFERENCE_MAX_BYTES => {
+            Ok(Some(format!("data:{};base64,{}", mime, BASE64.encode(&bytes))))
+        }
+        _ => Ok(Some(url)),
+    }
 }
 
 async fn build_image_request(state: &AppState, account_id: &str, conversation: &ConversationDto) -> AppResult<(String, Vec<ImageUpload>)> {
