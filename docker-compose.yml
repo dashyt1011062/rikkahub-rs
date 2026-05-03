@@ -1,0 +1,21 @@
+services:
+  rikkahub-rs:
+    build: .
+    container_name: rikkahub-rs
+    env_file:
+      - /opt/rikkahub/.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATA_DIR: /data
+      WEB_UI_DIR: /web-ui
+      JWT_ENABLED: "true"
+      APP_VERSION: rust-preview
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - /opt/rikkahub/data:/data
+      - /opt/rikkahub-rs/web-ui:/web-ui:ro
+    restart: "no"
+
