@@ -1585,7 +1585,7 @@ fn text_part(text: &str) -> Value {
 }
 
 fn reasoning_part(text: &str) -> Value {
-    json!({ "type": "reasoning", "text": text })
+    json!({ "type": "reasoning", "reasoning": text })
 }
 
 fn image_part(url: &str, generated: bool) -> Value {
