@@ -1,6 +1,5 @@
 /target/
 /.cargo-registry/
-/web-ui/
 /.env
 /.env.*
 !/.env.example
