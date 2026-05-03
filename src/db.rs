@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 
+use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task;
+use uuid::Uuid;
 
 use crate::config::DEFAULT_ASSISTANT_ID;
 use crate::error::{AppError, AppResult};
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationListDto {
     pub id: String,
@@ -20,7 +22,7 @@ pub struct ConversationListDto {
     pub is_generating: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PagedResult<T> {
     pub items: Vec<T>,
@@ -28,7 +30,7 @@ pub struct PagedResult<T> {
     pub has_more: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationDto {
     pub id: String,
@@ -43,7 +45,7 @@ pub struct ConversationDto {
     pub is_generating: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageNodeDto {
     pub id: String,
@@ -51,7 +53,7 @@ pub struct MessageNodeDto {
     pub select_index: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageDto {
     pub id: String,
@@ -90,6 +92,21 @@ pub struct ManagedFileRecord {
     pub mime_type: String,
     pub size_bytes: i64,
     pub account_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedFileDto {
+    pub id: i64,
+    pub url: String,
+    pub file_name: String,
+    pub mime: String,
+    pub size: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UploadFilesResponseDto {
+    pub files: Vec<UploadedFileDto>,
 }
 
 pub async fn list_conversations(
@@ -272,7 +289,180 @@ pub async fn get_file_by_path(db_path: PathBuf, account_id: String, relative_pat
     .map_err(|error| AppError::internal(format!("file path lookup task failed: {error}")))?
 }
 
+pub async fn ensure_conversation(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+    assistant_id: String,
+) -> AppResult<ConversationDto> {
+    let existing = get_conversation(db_path.clone(), account_id.clone(), conversation_id.clone()).await;
+    match existing {
+        Ok(conversation) => Ok(conversation),
+        Err(error) if error.status == axum::http::StatusCode::NOT_FOUND => {
+            let now = now_millis();
+            let conversation = ConversationDto {
+                id: conversation_id,
+                assistant_id,
+                title: String::new(),
+                messages: Vec::new(),
+                truncate_index: -1,
+                chat_suggestions: Vec::new(),
+                is_pinned: false,
+                create_at: now,
+                update_at: now,
+                is_generating: false,
+            };
+            upsert_conversation(db_path, account_id, conversation.clone()).await?;
+            Ok(conversation)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub async fn upsert_conversation(db_path: PathBuf, account_id: String, conversation: ConversationDto) -> AppResult<()> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        ensure_conversation_writable(&tx, &conversation.id, &account_id)?;
+        tx.execute(
+            "INSERT INTO conversationentity (
+                id, account_id, assistant_id, title, nodes, create_at, update_at, truncate_index, suggestions, is_pinned
+             ) VALUES (?1, ?2, ?3, ?4, '[]', ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                assistant_id = excluded.assistant_id,
+                title = excluded.title,
+                update_at = excluded.update_at,
+                truncate_index = excluded.truncate_index,
+                suggestions = excluded.suggestions,
+                is_pinned = excluded.is_pinned",
+            params![
+                conversation.id,
+                account_id,
+                conversation.assistant_id,
+                conversation.title,
+                conversation.create_at,
+                conversation.update_at,
+                conversation.truncate_index,
+                serde_json::to_string(&conversation.chat_suggestions).unwrap_or_else(|_| "[]".to_string()),
+                if conversation.is_pinned { 1 } else { 0 },
+            ],
+        )?;
+        tx.execute("DELETE FROM message_node WHERE conversation_id = ?1", params![conversation.id])?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO message_node (id, conversation_id, node_index, messages, select_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (index, node) in conversation.messages.iter().enumerate() {
+                stmt.execute(params![
+                    node.id,
+                    conversation.id,
+                    index as i64,
+                    serde_json::to_string(&node.messages)?,
+                    node.select_index,
+                ])?;
+            }
+        }
+
+        replace_message_search_index(&tx, &conversation)?;
+        tx.commit()?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("conversation upsert task failed: {error}")))?
+}
+
+pub async fn delete_conversation(db_path: PathBuf, account_id: String, conversation_id: String) -> AppResult<bool> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM conversationentity WHERE id = ?1 AND account_id = ?2",
+            params![conversation_id, account_id],
+        )? > 0;
+        if deleted {
+            tx.execute("DELETE FROM message_fts WHERE conversation_id = ?1", params![conversation_id])?;
+        }
+        tx.commit()?;
+        Ok::<bool, AppError>(deleted)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("conversation delete task failed: {error}")))?
+}
+
+pub async fn insert_remote_file(
+    db_path: PathBuf,
+    account_id: String,
+    display_name: String,
+    mime_type: String,
+    size_bytes: i64,
+    storage_provider: String,
+    remote_url: String,
+    page_url: Option<String>,
+    delete_url: Option<String>,
+    thumbnail_url: Option<String>,
+) -> AppResult<ManagedFileRecord> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        let safe_name = sanitize_display_name(&display_name);
+        let relative_path = unique_upload_relative_path(&safe_name);
+        let now = now_millis();
+        conn.execute(
+            "INSERT INTO managed_files (
+                account_id, folder, relative_path, storage_provider, remote_url, page_url, delete_url, thumbnail_url,
+                display_name, mime_type, size_bytes, created_at, updated_at
+             ) VALUES (?1, 'upload', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                account_id,
+                relative_path,
+                storage_provider,
+                remote_url,
+                page_url,
+                delete_url,
+                thumbnail_url,
+                safe_name,
+                mime_type,
+                size_bytes,
+                now,
+                now,
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        Ok(ManagedFileRecord {
+            id,
+            relative_path,
+            storage_provider,
+            remote_url: Some(remote_url),
+            display_name: safe_name,
+            mime_type,
+            size_bytes,
+            account_id,
+        })
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("file insert task failed: {error}")))?
+}
+
+pub async fn delete_file_record(db_path: PathBuf, account_id: String, id: i64) -> AppResult<bool> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        Ok::<bool, AppError>(
+            conn.execute(
+                "DELETE FROM managed_files WHERE id = ?1 AND account_id = ?2",
+                params![id, account_id],
+            )? > 0,
+        )
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("file delete task failed: {error}")))?
+}
+
 fn open_readonly(path: &PathBuf) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+}
+
+fn open_connection(path: &PathBuf) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
 }
 
@@ -308,6 +498,41 @@ fn row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedFileRecord> {
     })
 }
 
+pub fn new_message(role: &str, parts: Vec<Value>, model_id: Option<String>, finished: bool) -> MessageDto {
+    let now = now_iso();
+    MessageDto {
+        id: random_id(),
+        role: role.to_string(),
+        parts,
+        annotations: Vec::new(),
+        created_at: now.clone(),
+        finished_at: if finished { Some(now) } else { None },
+        model_id,
+        usage: None,
+        translation: None,
+    }
+}
+
+pub fn new_node(message: MessageDto) -> MessageNodeDto {
+    MessageNodeDto {
+        id: random_id(),
+        messages: vec![message],
+        select_index: 0,
+    }
+}
+
+pub fn now_millis() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+pub fn now_iso() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+pub fn random_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
 fn parse_string_array(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
@@ -339,11 +564,112 @@ fn parse_message(value: Value) -> Option<MessageDto> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        finished_at: object.get("finishedAt").and_then(Value::as_str).map(str::to_string),
-        model_id: object.get("modelId").and_then(Value::as_str).map(str::to_string),
+        finished_at: object
+            .get("finishedAt")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        model_id: object
+            .get("modelId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         usage: object.get("usage").cloned().filter(|value| !value.is_null()),
-        translation: object.get("translation").and_then(Value::as_str).map(str::to_string),
+        translation: object
+            .get("translation")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
+}
+
+fn ensure_conversation_writable(conn: &Connection, id: &str, account_id: &str) -> AppResult<()> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT account_id FROM conversationentity WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing != account_id {
+            return Err(AppError::forbidden("Conversation belongs to another account"));
+        }
+    }
+    Ok(())
+}
+
+fn replace_message_search_index(conn: &Connection, conversation: &ConversationDto) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM message_fts WHERE conversation_id = ?1",
+        params![conversation.id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO message_fts(text, node_id, message_id, conversation_id, title, update_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for node in &conversation.messages {
+        for message in &node.messages {
+            let text = extract_search_text(message);
+            if text.trim().is_empty() {
+                continue;
+            }
+            stmt.execute(params![
+                text,
+                node.id,
+                message.id,
+                conversation.id,
+                conversation.title,
+                conversation.update_at,
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_search_text(message: &MessageDto) -> String {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let object = part.as_object()?;
+            let kind = object.get("type")?.as_str()?.to_ascii_lowercase();
+            if kind == "text" {
+                object.get("text").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(10_000)
+        .collect()
+}
+
+fn sanitize_display_name(file_name: &str) -> String {
+    let base = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("file")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    if base.trim().is_empty() {
+        "file".to_string()
+    } else {
+        base
+    }
+}
+
+fn unique_upload_relative_path(display_name: &str) -> String {
+    let extension = display_name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.trim())
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+    format!("upload/{}{}", random_id(), extension)
 }
 
 fn search_messages_like(

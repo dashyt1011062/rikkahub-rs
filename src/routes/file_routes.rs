@@ -3,18 +3,20 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Extension, Path as AxumPath, Query, State};
+use axum::extract::{Extension, Multipart, Path as AxumPath, Query, State};
 use axum::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::Redirect;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use mime_guess::mime;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use tokio_util::io::ReaderStream;
 
 use crate::auth::AccountId;
 use crate::db::{self, ManagedFileRecord};
 use crate::error::{AppError, AppResult};
+use crate::imgpile;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -42,10 +44,77 @@ pub async fn by_path(
     respond_local_file(&state.config.data_dir, &file).await
 }
 
-pub async fn upload_not_implemented() -> AppResult<StatusCode> {
-    Err(AppError::not_implemented(
-        "File upload is not implemented in the Rust preview yet",
-    ))
+pub async fn upload(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> AppResult<(StatusCode, axum::Json<db::UploadFilesResponseDto>)> {
+    let mut files = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Invalid multipart upload: {error}")))?
+    {
+        let file_name = field.file_name().unwrap_or("file").to_string();
+        let mime_type = field
+            .content_type()
+            .map(str::to_string)
+            .unwrap_or_else(|| mime_guess::from_path(&file_name).first_or_octet_stream().to_string());
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|error| AppError::bad_request(format!("upload read failed: {error}")))?;
+        if bytes.len() as u64 > state.config.upload_max_bytes {
+            return Err(AppError::bad_request(format!(
+                "File too large: max {} MB",
+                state.config.upload_max_bytes / (1024 * 1024)
+            )));
+        }
+        let upload = imgpile::upload_bytes(
+            state.http.clone(),
+            state.config.imgpile_key.clone(),
+            bytes,
+            file_name.clone(),
+            mime_type.clone(),
+        )
+        .await?;
+        let record = db::insert_remote_file(
+            state.config.db_path.clone(),
+            account.0.clone(),
+            file_name,
+            mime_type.clone(),
+            upload.size_bytes,
+            "imgpile".to_string(),
+            upload.original_url.clone(),
+            upload.page_url,
+            upload.delete_url,
+            upload.thumbnail_url,
+        )
+        .await?;
+        files.push(db::UploadedFileDto {
+            id: record.id,
+            url: upload.original_url,
+            file_name: record.display_name,
+            mime: mime_type,
+            size: record.size_bytes,
+        });
+    }
+    if files.is_empty() {
+        return Err(AppError::bad_request("No files uploaded"));
+    }
+    Ok((StatusCode::CREATED, axum::Json(db::UploadFilesResponseDto { files })))
+}
+
+pub async fn delete_by_id(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<axum::Json<Value>> {
+    let deleted = db::delete_file_record(state.config.db_path.clone(), account.0, id).await?;
+    if !deleted {
+        return Err(AppError::not_found("File not found"));
+    }
+    Ok(axum::Json(json!({ "status": "deleted" })))
 }
 
 async fn respond_file_record(state: AppState, file: ManagedFileRecord, proxy: bool) -> AppResult<Response<Body>> {
@@ -97,18 +166,16 @@ async fn proxy_remote_file(state: AppState, remote_url: String, fallback_mime: S
 
     let limit = state.config.max_remote_file_proxy_bytes;
     let mut total = 0u64;
-    let stream = response.bytes_stream().map_ok(move |chunk| {
+    let stream = response.bytes_stream().map(move |chunk| {
+        let chunk = chunk.map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
         total = total.saturating_add(chunk.len() as u64);
-        chunk
-    }).map_err(|error| io::Error::new(io::ErrorKind::Other, error));
+        if total > limit {
+            return Err(io::Error::new(io::ErrorKind::Other, "remote file is too large"));
+        }
+        Ok(chunk)
+    });
 
-    let body = Body::from_stream(stream.take_while(move |result| {
-        let allowed = result
-            .as_ref()
-            .map(|chunk| chunk.len() as u64 <= limit)
-            .unwrap_or(true);
-        async move { allowed }
-    }));
+    let body = Body::from_stream(stream);
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, content_type);
@@ -187,4 +254,3 @@ impl IntoResponseExt for (StatusCode, HeaderMap, Body) {
         axum::response::IntoResponse::into_response(self)
     }
 }
-
