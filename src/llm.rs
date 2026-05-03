@@ -10,10 +10,22 @@ use serde_json::{json, Map, Value};
 use crate::db::{self, ConversationDto, MessageDto};
 use crate::error::{AppError, AppResult};
 use crate::imgpile;
+use crate::mcp::{self, AvailableTool};
 use crate::AppState;
 
 const DEFAULT_IMAGE_GENERATION_PROMPT: &str = "Generate an image.";
 const DEFAULT_IMAGE_EDIT_PROMPT: &str = "Edit the image according to the prompt.";
+const DEFAULT_TITLE_PROMPT: &str = r#"I will give you some dialogue content in the <content> block.
+You need to summarize the conversation between user and assistant into a short title.
+1. The title language should be consistent with the user's primary language
+2. Do not use punctuation or other special symbols
+3. Reply directly with the title
+4. Summarize using {locale} language
+5. The title should not exceed 10 characters
+
+<content>
+{content}
+</content>"#;
 const IMAGE_REFERENCE_MAX_BYTES: usize = 25 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -26,6 +38,7 @@ pub struct AssistantGenerationResult {
 #[derive(Clone, Debug)]
 struct Selection {
     provider: Value,
+    provider_type: String,
     model: Value,
     assistant: Value,
     api_key: String,
@@ -36,6 +49,20 @@ struct ImageUpload {
     file_name: String,
     mime_type: String,
     bytes: Bytes,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StreamingToolCall {
+    id: Option<String>,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Clone, Debug)]
+struct ProviderChatMessage {
+    role: String,
+    text: String,
+    image_urls: Vec<String>,
 }
 
 pub async fn generate_reply_streaming<F, Fut>(
@@ -53,8 +80,15 @@ where
     if is_image_generation_model(&selection.model) {
         return generate_image(state, account_id, &selection, conversation).await;
     }
+    if selection.provider_type == "anthropic" {
+        return generate_anthropic(state, account_id, &selection, conversation).await;
+    }
+    if selection.provider_type == "google" {
+        return generate_google(state, account_id, &selection, conversation).await;
+    }
 
-    let messages = build_openai_messages(state, account_id, conversation).await?;
+    let messages = build_openai_messages(state, account_id, conversation, &selection.assistant).await?;
+    let available_tools = mcp::build_available_tools(settings, &selection.assistant);
     let model_id = selection.model.get("id").and_then(Value::as_str).map(str::to_string);
     let mut payload = json!({
         "model": selection.model.get("modelId").and_then(Value::as_str).unwrap_or("auto"),
@@ -63,6 +97,7 @@ where
         "stream_options": { "include_usage": true },
     });
     add_generation_options(&mut payload, &selection.assistant);
+    add_openai_tools(&mut payload, &available_tools);
     add_custom_bodies(&mut payload, &selection.model);
 
     let url = join_url(
@@ -101,6 +136,7 @@ where
     let mut reasoning = String::new();
     let mut usage = None;
     let mut buffer = String::new();
+    let mut tool_calls = std::collections::BTreeMap::<usize, StreamingToolCall>::new();
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
@@ -149,6 +185,7 @@ where
                 reasoning.push_str(reasoning_delta);
                 changed = true;
             }
+            collect_streaming_tool_calls(delta, &mut tool_calls);
             if changed {
                 on_partial(AssistantGenerationResult {
                     parts: build_streaming_parts(&content, &reasoning),
@@ -160,12 +197,12 @@ where
         }
     }
 
-    if content.trim().is_empty() && reasoning.trim().is_empty() {
-        return generate_reply_non_streaming(state, account_id, &selection, conversation).await;
+    if content.trim().is_empty() && reasoning.trim().is_empty() && tool_calls.is_empty() {
+        return generate_reply_non_streaming(state, account_id, settings, &selection, conversation, true).await;
     }
 
     Ok(AssistantGenerationResult {
-        parts: build_final_parts(&content, &reasoning),
+        parts: build_final_parts_with_tools(&content, &reasoning, &tool_calls, &available_tools),
         model_id,
         usage,
     })
@@ -244,18 +281,145 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
     Ok(stored)
 }
 
+pub async fn generate_title(
+    state: &AppState,
+    account_id: &str,
+    settings: &Value,
+    conversation: &ConversationDto,
+) -> AppResult<Option<String>> {
+    let input = build_title_input(conversation);
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    let prompt_template = settings
+        .get("titlePrompt")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(DEFAULT_TITLE_PROMPT);
+    let prompt = prompt_template
+        .replace("{locale}", "中文")
+        .replace("{content}", &input);
+    let preferred = settings
+        .get("titleModelId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut refs = Vec::<Option<&str>>::new();
+    match preferred {
+        Some(value) if !value.eq_ignore_ascii_case("auto") => {
+            refs.push(Some(value));
+            refs.push(Some("auto"));
+        }
+        Some(value) => refs.push(Some(value)),
+        None => refs.push(None),
+    }
+
+    for model_ref in refs {
+        let Ok(selection) = select_model_ref(settings, &conversation.assistant_id, model_ref) else {
+            continue;
+        };
+        let raw = generate_title_with_selection(state, account_id, &selection, &prompt)
+            .await
+            .unwrap_or_default();
+        let normalized = normalize_generated_title(&raw);
+        if !normalized.is_empty() {
+            return Ok(Some(normalized));
+        }
+    }
+    Ok(None)
+}
+
+async fn generate_title_with_selection(
+    state: &AppState,
+    _account_id: &str,
+    selection: &Selection,
+    prompt: &str,
+) -> AppResult<String> {
+    let messages = vec![ProviderChatMessage {
+        role: "user".to_string(),
+        text: prompt.to_string(),
+        image_urls: Vec::new(),
+    }];
+    let result = match selection.provider_type.as_str() {
+        "anthropic" => generate_anthropic_messages(state, selection, None, &messages).await?,
+        "google" => generate_google_messages(state, selection, None, &messages).await?,
+        _ => generate_openai_title(state, selection, prompt).await?,
+    };
+    Ok(result
+        .parts
+        .iter()
+        .filter(|part| part_type(part) == "text")
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn generate_openai_title(state: &AppState, selection: &Selection, prompt: &str) -> AppResult<AssistantGenerationResult> {
+    let mut payload = json!({
+        "model": selection.model.get("modelId").and_then(Value::as_str).unwrap_or("auto"),
+        "messages": [{ "role": "user", "content": prompt }],
+        "max_tokens": 80,
+    });
+    add_custom_bodies(&mut payload, &selection.model);
+    let url = join_url(
+        selection.provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.openai.com/v1"),
+        selection.provider.get("chatCompletionsPath").and_then(Value::as_str).unwrap_or("/chat/completions"),
+    );
+    let response = apply_custom_headers(state.http.post(url).bearer_auth(selection.api_key.clone()), &selection.model)?
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    let body = read_provider_json(response).await?;
+    let message = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|choice| choice.get("message"))
+        .cloned()
+        .unwrap_or(Value::Object(Map::new()));
+    Ok(AssistantGenerationResult {
+        parts: extract_message_parts(&message),
+        model_id: selection.model.get("id").and_then(Value::as_str).map(str::to_string),
+        usage: body.get("usage").cloned(),
+    })
+}
+
 async fn generate_reply_non_streaming(
     state: &AppState,
     account_id: &str,
+    settings: &Value,
     selection: &Selection,
     conversation: &ConversationDto,
+    include_tools: bool,
 ) -> AppResult<AssistantGenerationResult> {
-    let messages = build_openai_messages(state, account_id, conversation).await?;
+    match selection.provider_type.as_str() {
+        "anthropic" => generate_anthropic(state, account_id, selection, conversation).await,
+        "google" => generate_google(state, account_id, selection, conversation).await,
+        _ => generate_openai_non_streaming(state, account_id, settings, selection, conversation, include_tools).await,
+    }
+}
+
+async fn generate_openai_non_streaming(
+    state: &AppState,
+    account_id: &str,
+    settings: &Value,
+    selection: &Selection,
+    conversation: &ConversationDto,
+    include_tools: bool,
+) -> AppResult<AssistantGenerationResult> {
+    let messages = build_openai_messages(state, account_id, conversation, &selection.assistant).await?;
+    let available_tools = if include_tools {
+        mcp::build_available_tools(settings, &selection.assistant)
+    } else {
+        Vec::new()
+    };
     let mut payload = json!({
         "model": selection.model.get("modelId").and_then(Value::as_str).unwrap_or("auto"),
         "messages": messages,
     });
     add_generation_options(&mut payload, &selection.assistant);
+    add_openai_tools(&mut payload, &available_tools);
     add_custom_bodies(&mut payload, &selection.model);
     let url = join_url(
         selection.provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.openai.com/v1"),
@@ -299,6 +463,7 @@ async fn generate_reply_non_streaming(
     if !reasoning.is_empty() {
         parts.insert(0, reasoning_part(reasoning));
     }
+    parts.extend(extract_openai_tool_parts(&message, &available_tools));
     if parts.is_empty() {
         parts.push(text_part("Model returned empty response"));
     }
@@ -383,23 +548,166 @@ async fn generate_image(
     })
 }
 
+async fn generate_anthropic(
+    state: &AppState,
+    account_id: &str,
+    selection: &Selection,
+    conversation: &ConversationDto,
+) -> AppResult<AssistantGenerationResult> {
+    let (system_prompt, messages) = build_provider_messages(state, account_id, conversation, &selection.assistant).await?;
+    generate_anthropic_messages(state, selection, system_prompt.as_deref(), &messages).await
+}
+
+async fn generate_google(
+    state: &AppState,
+    account_id: &str,
+    selection: &Selection,
+    conversation: &ConversationDto,
+) -> AppResult<AssistantGenerationResult> {
+    let (system_prompt, messages) = build_provider_messages(state, account_id, conversation, &selection.assistant).await?;
+    generate_google_messages(state, selection, system_prompt.as_deref(), &messages).await
+}
+
+async fn generate_anthropic_messages(
+    state: &AppState,
+    selection: &Selection,
+    system_prompt: Option<&str>,
+    messages: &[ProviderChatMessage],
+) -> AppResult<AssistantGenerationResult> {
+    let mut payload_messages = Vec::new();
+    for message in messages.iter().filter(|message| message.role != "system") {
+        payload_messages.push(json!({
+            "role": if message.role == "assistant" { "assistant" } else { "user" },
+            "content": anthropic_content_for_message(state, message).await?,
+        }));
+    }
+    let mut payload = json!({
+        "model": selection.model.get("modelId").and_then(Value::as_str).unwrap_or("claude"),
+        "messages": payload_messages,
+        "max_tokens": selection.assistant.get("maxTokens").and_then(Value::as_i64).unwrap_or(1024).max(1),
+    });
+    if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty()) {
+        payload["system"] = Value::String(system_prompt.to_string());
+    }
+    add_generation_options(&mut payload, &selection.assistant);
+    add_custom_bodies(&mut payload, &selection.model);
+
+    let request = state
+        .http
+        .post(join_url(
+            selection.provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.anthropic.com/v1"),
+            "/messages",
+        ))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", selection.api_key.clone());
+    let response = apply_custom_headers(request, &selection.model)?
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    let body = read_provider_json(response).await?;
+    let content = body
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(AssistantGenerationResult {
+        parts: build_final_parts(&content, ""),
+        model_id: selection.model.get("id").and_then(Value::as_str).map(str::to_string),
+        usage: body.get("usage").cloned(),
+    })
+}
+
+async fn generate_google_messages(
+    state: &AppState,
+    selection: &Selection,
+    system_prompt: Option<&str>,
+    messages: &[ProviderChatMessage],
+) -> AppResult<AssistantGenerationResult> {
+    let mut contents = Vec::new();
+    for message in messages.iter().filter(|message| message.role != "system") {
+        contents.push(json!({
+            "role": if message.role == "assistant" { "model" } else { "user" },
+            "parts": google_parts_for_message(state, message).await?,
+        }));
+    }
+    let mut payload = json!({ "contents": contents });
+    if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty()) {
+        payload["systemInstruction"] = json!({ "parts": [{ "text": system_prompt }] });
+    }
+    let mut generation_config = Map::new();
+    if let Some(value) = selection.assistant.get("temperature").and_then(Value::as_f64) {
+        generation_config.insert("temperature".to_string(), json!(value));
+    }
+    if let Some(value) = selection.assistant.get("topP").and_then(Value::as_f64) {
+        generation_config.insert("topP".to_string(), json!(value));
+    }
+    if let Some(value) = selection.assistant.get("maxTokens").and_then(Value::as_i64) {
+        generation_config.insert("maxOutputTokens".to_string(), json!(value));
+    }
+    if !generation_config.is_empty() {
+        payload["generationConfig"] = Value::Object(generation_config);
+    }
+    add_custom_bodies(&mut payload, &selection.model);
+
+    let model = selection.model.get("modelId").and_then(Value::as_str).unwrap_or("gemini-2.0-flash");
+    let encoded_model = encode_google_model_id(model);
+    let base = selection.provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://generativelanguage.googleapis.com/v1beta");
+    let url = format!("{}/models/{}:generateContent?key={}", base.trim_end_matches('/'), encoded_model, selection.api_key);
+    let response = apply_custom_headers(state.http.post(url), &selection.model)?
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    let body = read_provider_json(response).await?;
+    let content = body
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(AssistantGenerationResult {
+        parts: build_final_parts(&content, ""),
+        model_id: selection.model.get("id").and_then(Value::as_str).map(str::to_string),
+        usage: body.get("usageMetadata").cloned(),
+    })
+}
+
 fn select_model(settings: &Value, conversation: &ConversationDto) -> AppResult<Selection> {
+    select_model_ref(settings, &conversation.assistant_id, None)
+}
+
+fn select_model_ref(settings: &Value, assistant_id: &str, model_ref_override: Option<&str>) -> AppResult<Selection> {
     let assistant = settings
         .get("assistants")
         .and_then(Value::as_array)
         .and_then(|items| {
             items
                 .iter()
-                .find(|item| item.get("id").and_then(Value::as_str) == Some(conversation.assistant_id.as_str()))
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(assistant_id))
         })
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let model_id = assistant
-        .get("chatModelId")
-        .or_else(|| settings.get("chatModelId"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty() && *value != "auto")
-        .ok_or_else(|| AppError::bad_request("No chat model selected"))?;
+    let model_id = match model_ref_override.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if !value.eq_ignore_ascii_case("auto") => value,
+        _ => assistant
+            .get("chatModelId")
+            .or_else(|| settings.get("chatModelId"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty() && *value != "auto")
+            .ok_or_else(|| AppError::bad_request("No chat model selected"))?,
+    };
 
     let providers = settings
         .get("providers")
@@ -420,6 +728,7 @@ fn select_model(settings: &Value, conversation: &ConversationDto) -> AppResult<S
                 .to_string();
             return Ok(Selection {
                 provider: provider.clone(),
+                provider_type: normalize_provider_type(provider),
                 model: model.clone(),
                 assistant,
                 api_key,
@@ -429,19 +738,71 @@ fn select_model(settings: &Value, conversation: &ConversationDto) -> AppResult<S
     Err(AppError::bad_request("Selected model not found"))
 }
 
-async fn build_openai_messages(state: &AppState, account_id: &str, conversation: &ConversationDto) -> AppResult<Vec<Value>> {
+async fn build_openai_messages(
+    state: &AppState,
+    account_id: &str,
+    conversation: &ConversationDto,
+    assistant: &Value,
+) -> AppResult<Vec<Value>> {
     let mut messages = Vec::new();
-    for node in &conversation.messages {
-        let index = node.select_index.max(0) as usize;
-        let Some(message) = node.messages.get(index).or_else(|| node.messages.first()) else {
-            continue;
-        };
+    if let Some(system_prompt) = assistant
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        messages.push(json!({ "role": "system", "content": system_prompt }));
+    }
+
+    let selected = selected_messages(conversation);
+    let window_size = assistant.get("contextMessageSize").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
+    let start = if window_size > 0 && selected.len() > window_size {
+        selected.len() - window_size
+    } else {
+        0
+    };
+
+    for message in selected.into_iter().skip(start) {
         let role = match message.role.trim().to_ascii_uppercase().as_str() {
             "ASSISTANT" => "assistant",
             "SYSTEM" => "system",
             _ => "user",
         };
-        let content = openai_content_for_message(state, account_id, message, role).await?;
+        if role == "assistant" {
+            let tool_calls = openai_tool_calls_for_message(message);
+            let content = parts_to_plain_text(&message.parts);
+            if content.trim().is_empty() && tool_calls.is_empty() {
+                continue;
+            }
+            let mut item = json!({
+                "role": "assistant",
+                "content": content,
+            });
+            if !tool_calls.is_empty() {
+                item["tool_calls"] = Value::Array(tool_calls);
+            }
+            messages.push(item);
+            for part in message.parts.iter().filter(|part| part_type(part) == "tool") {
+                let Some(call_id) = part.get("toolCallId").and_then(Value::as_str).filter(|value| !value.is_empty()) else {
+                    continue;
+                };
+                let output = tool_output_text(part);
+                if output.trim().is_empty() {
+                    continue;
+                }
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                }));
+            }
+            continue;
+        }
+
+        let content = openai_user_content_for_message(state, account_id, message, role).await?;
+        if content.as_str().map(|value| value.trim().is_empty()).unwrap_or(false) {
+            continue;
+        }
         messages.push(json!({
             "role": role,
             "content": content,
@@ -450,9 +811,9 @@ async fn build_openai_messages(state: &AppState, account_id: &str, conversation:
     Ok(messages)
 }
 
-async fn openai_content_for_message(state: &AppState, account_id: &str, message: &MessageDto, role: &str) -> AppResult<Value> {
-    if role == "assistant" {
-        return Ok(Value::String(parts_to_plain_text(&message.parts)));
+async fn openai_user_content_for_message(state: &AppState, account_id: &str, message: &MessageDto, role: &str) -> AppResult<Value> {
+    if role == "system" {
+        return Ok(Value::String(prompt_text(&message.parts)));
     }
     let mut blocks = Vec::new();
     for part in &message.parts {
@@ -577,6 +938,120 @@ async fn image_urls_from_parts(state: &AppState, account_id: &str, parts: &[Valu
     Ok(urls)
 }
 
+async fn build_provider_messages(
+    state: &AppState,
+    account_id: &str,
+    conversation: &ConversationDto,
+    assistant: &Value,
+) -> AppResult<(Option<String>, Vec<ProviderChatMessage>)> {
+    let system_prompt = assistant
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let selected = selected_messages(conversation);
+    let window_size = assistant.get("contextMessageSize").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
+    let start = if window_size > 0 && selected.len() > window_size {
+        selected.len() - window_size
+    } else {
+        0
+    };
+    let mut out = Vec::new();
+    for message in selected.into_iter().skip(start) {
+        let role = match message.role.trim().to_ascii_uppercase().as_str() {
+            "ASSISTANT" => "assistant",
+            "SYSTEM" => "system",
+            _ => "user",
+        }
+        .to_string();
+        if role == "system" {
+            let text = prompt_text(&message.parts);
+            if !text.trim().is_empty() {
+                out.push(ProviderChatMessage {
+                    role,
+                    text,
+                    image_urls: Vec::new(),
+                });
+            }
+            continue;
+        }
+        let text = if role == "assistant" {
+            parts_to_plain_text(&message.parts)
+        } else {
+            prompt_text(&message.parts)
+        };
+        let image_urls = if role == "user" {
+            image_urls_from_parts(state, account_id, &message.parts).await?
+        } else {
+            Vec::new()
+        };
+        if text.trim().is_empty() && image_urls.is_empty() {
+            continue;
+        }
+        out.push(ProviderChatMessage {
+            role,
+            text,
+            image_urls,
+        });
+    }
+    Ok((system_prompt, out))
+}
+
+async fn anthropic_content_for_message(state: &AppState, message: &ProviderChatMessage) -> AppResult<Value> {
+    if message.role == "assistant" || message.image_urls.is_empty() {
+        return Ok(Value::String(message.text.clone()));
+    }
+    let mut blocks = Vec::new();
+    if !message.text.trim().is_empty() {
+        blocks.push(json!({ "type": "text", "text": message.text.clone() }));
+    }
+    for url in &message.image_urls {
+        if let Some((bytes, mime)) = image_bytes_from_url(state, url).await? {
+            if bytes.len() <= IMAGE_REFERENCE_MAX_BYTES {
+                blocks.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": BASE64.encode(&bytes),
+                    }
+                }));
+                continue;
+            }
+        }
+        blocks.push(json!({ "type": "text", "text": "[image]" }));
+    }
+    Ok(Value::Array(blocks))
+}
+
+async fn google_parts_for_message(state: &AppState, message: &ProviderChatMessage) -> AppResult<Vec<Value>> {
+    let mut parts = Vec::new();
+    if !message.text.trim().is_empty() {
+        parts.push(json!({ "text": message.text.clone() }));
+    }
+    if message.role != "assistant" {
+        for url in &message.image_urls {
+            if let Some((bytes, mime)) = image_bytes_from_url(state, url).await? {
+                if bytes.len() <= IMAGE_REFERENCE_MAX_BYTES {
+                    parts.push(json!({
+                        "inlineData": {
+                            "mimeType": mime,
+                            "data": BASE64.encode(&bytes),
+                        }
+                    }));
+                    continue;
+                }
+            }
+            parts.push(json!({ "text": "[image]" }));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(json!({ "text": message.text.clone() }));
+    }
+    Ok(parts)
+}
+
 async fn image_bytes_from_url(state: &AppState, raw_url: &str) -> AppResult<Option<(Bytes, String)>> {
     let url = raw_url.trim();
     if url.is_empty() {
@@ -624,6 +1099,251 @@ fn selected_messages(conversation: &ConversationDto) -> Vec<&MessageDto> {
             node.messages.get(index).or_else(|| node.messages.first())
         })
         .collect()
+}
+
+fn add_openai_tools(payload: &mut Value, tools: &[AvailableTool]) {
+    if tools.is_empty() {
+        return;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "tools".to_string(),
+        Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name.clone(),
+                            "description": tool.description.clone(),
+                            "parameters": tool.parameters.clone(),
+                        }
+                    })
+                })
+                .collect(),
+        ),
+    );
+    object.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+}
+
+fn collect_streaming_tool_calls(delta: &Value, out: &mut std::collections::BTreeMap<usize, StreamingToolCall>) {
+    for item in delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+        let index = item.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let entry = out.entry(index).or_default();
+        if let Some(id) = item.get("id").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+            entry.id = Some(id.to_string());
+        }
+        if let Some(function) = item.get("function") {
+            if let Some(name) = function.get("name").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                entry.name.push_str(name);
+            }
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                entry.arguments.push_str(arguments);
+            }
+        }
+    }
+}
+
+fn build_final_parts_with_tools(
+    content: &str,
+    reasoning: &str,
+    tool_calls: &std::collections::BTreeMap<usize, StreamingToolCall>,
+    available_tools: &[AvailableTool],
+) -> Vec<Value> {
+    let mut parts = build_final_parts(content, reasoning);
+    if parts.len() == 1
+        && parts[0].get("type").and_then(Value::as_str) == Some("text")
+        && parts[0].get("text").and_then(Value::as_str) == Some("Model returned empty response")
+        && !tool_calls.is_empty()
+    {
+        parts.clear();
+    }
+    let approval_map = available_tools
+        .iter()
+        .map(|tool| (tool.name.as_str(), tool.needs_approval))
+        .collect::<std::collections::HashMap<_, _>>();
+    for call in tool_calls.values() {
+        let tool_name = call.name.trim();
+        if tool_name.is_empty() {
+            continue;
+        }
+        let approval_type = if approval_map.get(tool_name).copied().unwrap_or(false) {
+            "pending"
+        } else {
+            "auto"
+        };
+        parts.push(json!({
+            "type": "tool",
+            "toolCallId": call.id.clone().unwrap_or_else(db::random_id),
+            "toolName": tool_name,
+            "input": if call.arguments.trim().is_empty() { "{}" } else { call.arguments.trim() },
+            "output": [],
+            "approvalState": { "type": approval_type },
+        }));
+    }
+    if parts.is_empty() {
+        parts.push(text_part("Model returned empty response"));
+    }
+    parts
+}
+
+fn extract_openai_tool_parts(message: &Value, available_tools: &[AvailableTool]) -> Vec<Value> {
+    let approval_map = available_tools
+        .iter()
+        .map(|tool| (tool.name.as_str(), tool.needs_approval))
+        .collect::<std::collections::HashMap<_, _>>();
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            let function = call.get("function")?;
+            let tool_name = function.get("name").and_then(Value::as_str)?.trim();
+            if tool_name.is_empty() {
+                return None;
+            }
+            let approval_type = if approval_map.get(tool_name).copied().unwrap_or(false) {
+                "pending"
+            } else {
+                "auto"
+            };
+            Some(json!({
+                "type": "tool",
+                "toolCallId": call.get("id").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(db::random_id),
+                "toolName": tool_name,
+                "input": function.get("arguments").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("{}"),
+                "output": [],
+                "approvalState": { "type": approval_type },
+            }))
+        })
+        .collect()
+}
+
+fn openai_tool_calls_for_message(message: &MessageDto) -> Vec<Value> {
+    message
+        .parts
+        .iter()
+        .filter(|part| part_type(part) == "tool")
+        .filter_map(|part| {
+            let tool_name = part.get("toolName").and_then(Value::as_str)?.trim();
+            if tool_name.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "id": part.get("toolCallId").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(db::random_id),
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": part.get("input").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("{}"),
+                }
+            }))
+        })
+        .collect()
+}
+
+fn tool_output_text(part: &Value) -> String {
+    part.get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn part_type(part: &Value) -> String {
+    part.get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn normalize_provider_type(provider: &Value) -> String {
+    let raw = provider
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("openai")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    match raw.as_str() {
+        "claude" | "anthropic" => "anthropic".to_string(),
+        "google" | "gemini" => "google".to_string(),
+        _ => "openai".to_string(),
+    }
+}
+
+async fn read_provider_json(response: reqwest::Response) -> AppResult<Value> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(AppError::bad_request(format!(
+            "Provider request failed ({}): {}",
+            status.as_u16(),
+            body.chars().take(400).collect::<String>()
+        )));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider returned invalid JSON: {error}")))
+}
+
+fn build_title_input(conversation: &ConversationDto) -> String {
+    selected_messages(conversation)
+        .into_iter()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter_map(|message| {
+            let text = prompt_text(&message.parts);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(format!("{}: {}", message.role.trim().to_ascii_lowercase(), text.trim()))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_generated_title(raw: &str) -> String {
+    raw.replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .chars()
+        .take(96)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn encode_google_model_id(model: &str) -> String {
+    let mut out = String::new();
+    for ch in model.trim().chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => out.push(ch),
+            other => {
+                let mut buf = [0u8; 4];
+                for byte in other.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn add_generation_options(payload: &mut Value, assistant: &Value) {

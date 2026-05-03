@@ -6,6 +6,7 @@ mod error;
 mod events;
 mod imgpile;
 mod llm;
+mod mcp;
 mod routes;
 mod settings_store;
 

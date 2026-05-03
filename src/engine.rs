@@ -9,8 +9,11 @@ use crate::db::{self, ConversationDto, MessageNodeDto};
 use crate::error::{AppError, AppResult};
 use crate::events::AppEvent;
 use crate::llm;
+use crate::mcp;
 use crate::settings_store;
 use crate::AppState;
+
+const MAX_TOOL_ROUNDS: usize = 4;
 
 #[derive(Clone, Default)]
 pub struct EngineState {
@@ -251,10 +254,16 @@ pub async fn update_title(
 }
 
 pub async fn regenerate_title(state: &AppState, account_id: String, conversation_id: String) -> AppResult<()> {
-    let mut conversation = db::get_conversation(state.config.db_path.clone(), account_id.clone(), conversation_id).await?;
-    conversation.title = derive_title(&conversation);
-    db::upsert_conversation(state.config.db_path.clone(), account_id.clone(), conversation.clone()).await?;
-    emit_changed(state, &account_id, &conversation);
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = generate_and_store_title(task_state.clone(), account_id.clone(), conversation_id.clone(), true).await {
+            task_state.events.emit(AppEvent::ConversationError {
+                account_id,
+                conversation_id,
+                message: error.message,
+            });
+        }
+    });
     Ok(())
 }
 
@@ -330,46 +339,51 @@ pub async fn start_generation(state: AppState, account_id: String, conversation_
 async fn run_generation(state: AppState, account_id: String, conversation_id: String) -> AppResult<()> {
     let settings = settings_store::read_settings(&state.config, &account_id).await?;
     let mut conversation = db::get_conversation(state.config.db_path.clone(), account_id.clone(), conversation_id.clone()).await?;
-    let stream_node_id = Arc::new(Mutex::new(None::<String>));
 
-    let result = llm::generate_reply_streaming(&state, &account_id, &settings, &conversation, |partial| {
-        let state = state.clone();
-        let account_id = account_id.clone();
-        let conversation_id = conversation_id.clone();
-        let stream_node_id = Arc::clone(&stream_node_id);
-        async move {
-            let mut guard = stream_node_id.lock().await;
-            upsert_assistant_message(
-                &state,
-                &account_id,
-                &conversation_id,
-                &mut *guard,
-                partial,
-                false,
-            )
-            .await?;
-            Ok(())
+    for _ in 0..MAX_TOOL_ROUNDS {
+        let stream_node_id = Arc::new(Mutex::new(None::<String>));
+
+        let result = llm::generate_reply_streaming(&state, &account_id, &settings, &conversation, |partial| {
+            let state = state.clone();
+            let account_id = account_id.clone();
+            let conversation_id = conversation_id.clone();
+            let stream_node_id = Arc::clone(&stream_node_id);
+            async move {
+                let mut guard = stream_node_id.lock().await;
+                upsert_assistant_message(
+                    &state,
+                    &account_id,
+                    &conversation_id,
+                    &mut *guard,
+                    partial,
+                    false,
+                )
+                .await?;
+                Ok(())
+            }
+        })
+        .await?;
+
+        let mut stream_node_id = stream_node_id.lock().await;
+        conversation = upsert_assistant_message(
+            &state,
+            &account_id,
+            &conversation_id,
+            &mut *stream_node_id,
+            result,
+            true,
+        )
+        .await?;
+
+        if execute_auto_tools(&state, &account_id, &settings, &mut conversation).await? {
+            conversation = db::get_conversation(state.config.db_path.clone(), account_id.clone(), conversation_id.clone()).await?;
+            continue;
         }
-    })
-    .await?;
-
-    let mut stream_node_id = stream_node_id.lock().await;
-    conversation = upsert_assistant_message(
-        &state,
-        &account_id,
-        &conversation_id,
-        &mut *stream_node_id,
-        result,
-        true,
-    )
-    .await?;
+        break;
+    }
 
     if conversation.title.trim().is_empty() {
-        let mut titled = conversation.clone();
-        titled.title = derive_title(&titled);
-        titled.update_at = db::now_millis();
-        db::upsert_conversation(state.config.db_path.clone(), account_id.clone(), titled.clone()).await?;
-        emit_changed(&state, &account_id, &titled);
+        start_title_generation(state.clone(), account_id, conversation_id, false).await;
     }
     Ok(())
 }
@@ -427,6 +441,163 @@ async fn upsert_assistant_message(
     db::upsert_conversation(state.config.db_path.clone(), account_id.to_string(), conversation.clone()).await?;
     emit_changed(state, account_id, &conversation);
     Ok(conversation)
+}
+
+async fn execute_auto_tools(
+    state: &AppState,
+    account_id: &str,
+    settings: &Value,
+    conversation: &mut ConversationDto,
+) -> AppResult<bool> {
+    let assistant = find_assistant(settings, &conversation.assistant_id).unwrap_or_else(|| json!({}));
+    let Some((node_index, message_index)) = conversation
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(node_index, node)| {
+            let selected_index = node.select_index.max(0) as usize;
+            let message_index = if node.messages.get(selected_index).is_some() { selected_index } else { 0 };
+            let message = node.messages.get(message_index)?;
+            message
+                .role
+                .eq_ignore_ascii_case("ASSISTANT")
+                .then_some((node_index, message_index))
+        })
+    else {
+        return Ok(false);
+    };
+
+    let Some(message) = conversation
+        .messages
+        .get(node_index)
+        .and_then(|node| node.messages.get(message_index))
+    else {
+        return Ok(false);
+    };
+
+    let calls = message
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(part_index, part)| {
+            if part.get("type").and_then(Value::as_str).map(|value| value.eq_ignore_ascii_case("tool")) != Some(true) {
+                return None;
+            }
+            if !tool_output_text(part).trim().is_empty() {
+                return None;
+            }
+            let approval = part
+                .get("approvalState")
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("auto");
+            if approval != "auto" && approval != "approved" {
+                return None;
+            }
+            let tool_name = part.get("toolName").and_then(Value::as_str)?.trim().to_string();
+            if !tool_name.starts_with("mcp__") {
+                return None;
+            }
+            let input = part.get("input").and_then(Value::as_str).unwrap_or("{}").to_string();
+            Some((part_index, tool_name, input))
+        })
+        .collect::<Vec<_>>();
+
+    if calls.is_empty() {
+        return Ok(false);
+    }
+
+    let mut outputs = Vec::new();
+    for (part_index, tool_name, input) in calls {
+        let arguments = serde_json::from_str::<Value>(&input).unwrap_or_else(|_| json!({}));
+        let output = match mcp::resolve_tool(settings, &assistant, &tool_name) {
+            Some(resolved) => match mcp::call_tool(state, &resolved, arguments).await {
+                Ok(value) => value,
+                Err(error) => json!({ "error": error.message, "toolName": tool_name }),
+            },
+            None => json!({ "error": "mcp tool not found or server not configured", "toolName": tool_name }),
+        };
+        let text = serde_json::to_string(&output).unwrap_or_else(|_| output.to_string());
+        outputs.push((part_index, json!([{ "type": "text", "text": text }])));
+    }
+
+    if let Some(message) = conversation
+        .messages
+        .get_mut(node_index)
+        .and_then(|node| node.messages.get_mut(message_index))
+    {
+        for (part_index, output) in outputs {
+            if let Some(part) = message.parts.get_mut(part_index).and_then(Value::as_object_mut) {
+                part.insert("output".to_string(), output);
+            }
+        }
+        message.finished_at.get_or_insert_with(db::now_iso);
+    }
+    conversation.update_at = db::now_millis();
+    db::upsert_conversation(state.config.db_path.clone(), account_id.to_string(), conversation.clone()).await?;
+    emit_changed(state, account_id, conversation);
+    Ok(true)
+}
+
+async fn start_title_generation(state: AppState, account_id: String, conversation_id: String, force: bool) {
+    tokio::spawn(async move {
+        if let Err(error) = generate_and_store_title(state.clone(), account_id.clone(), conversation_id.clone(), force).await {
+            state.events.emit(AppEvent::ConversationError {
+                account_id,
+                conversation_id,
+                message: error.message,
+            });
+        }
+    });
+}
+
+async fn generate_and_store_title(
+    state: AppState,
+    account_id: String,
+    conversation_id: String,
+    force: bool,
+) -> AppResult<()> {
+    let settings = settings_store::read_settings(&state.config, &account_id).await?;
+    let mut conversation = db::get_conversation(state.config.db_path.clone(), account_id.clone(), conversation_id).await?;
+    if !force && !conversation.title.trim().is_empty() {
+        return Ok(());
+    }
+    let generated = llm::generate_title(&state, &account_id, &settings, &conversation)
+        .await
+        .ok()
+        .flatten();
+    let title = generated
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| derive_title(&conversation));
+    if title.trim().is_empty() {
+        return Ok(());
+    }
+    conversation.title = title;
+    conversation.update_at = db::now_millis();
+    db::upsert_conversation(state.config.db_path.clone(), account_id.clone(), conversation.clone()).await?;
+    emit_changed(&state, &account_id, &conversation);
+    Ok(())
+}
+
+fn find_assistant(settings: &Value, assistant_id: &str) -> Option<Value> {
+    settings
+        .get("assistants")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|assistant| assistant.get("id").and_then(Value::as_str) == Some(assistant_id))
+        .cloned()
+}
+
+fn tool_output_text(part: &Value) -> String {
+    part.get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn emit_changed(state: &AppState, account_id: &str, conversation: &ConversationDto) {

@@ -458,6 +458,49 @@ pub async fn delete_file_record(db_path: PathBuf, account_id: String, id: i64) -
     .map_err(|error| AppError::internal(format!("file delete task failed: {error}")))?
 }
 
+pub async fn rebuild_message_search_index(db_path: PathBuf) -> AppResult<()> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM message_fts", [])?;
+        {
+            let mut select = tx.prepare(
+                "SELECT n.id, n.conversation_id, n.messages, c.title, c.update_at
+                 FROM message_node n
+                 JOIN conversationentity c ON c.id = n.conversation_id
+                 ORDER BY n.node_index ASC",
+            )?;
+            let mut insert = tx.prepare(
+                "INSERT INTO message_fts(text, node_id, message_id, conversation_id, title, update_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            let rows = select.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (node_id, conversation_id, messages_raw, title, update_at) = row?;
+                for message in parse_messages(&messages_raw) {
+                    let text = extract_search_text(&message);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    insert.execute(params![text, node_id, message.id, conversation_id, title, update_at])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("search index rebuild task failed: {error}")))?
+}
+
 fn open_readonly(path: &PathBuf) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
 }

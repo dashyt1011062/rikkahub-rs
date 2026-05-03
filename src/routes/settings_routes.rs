@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 use crate::auth::AccountId;
 use crate::error::{AppError, AppResult};
+use crate::mcp;
 use crate::settings_store;
 use crate::AppState;
 
@@ -185,28 +186,11 @@ pub async fn provider_models_fetch(
     let provider_id = request.get("providerId").and_then(Value::as_str).unwrap_or_default();
     let settings = settings_store::read_settings(&state.config, &account.0).await?;
     let provider = find_provider(&settings, provider_id).ok_or_else(|| AppError::not_found("Provider not found"))?;
-    let base = provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.openai.com/v1");
-    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or_default();
-    let response = state
-        .http
-        .get(format!("{}/models", base.trim_end_matches('/')))
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .map_err(|error| AppError::bad_request(format!("Fetch models failed: {error}")))?;
-    if !response.status().is_success() {
-        return Err(AppError::bad_request(format!("Fetch models failed: HTTP {}", response.status().as_u16())));
-    }
-    let body: Value = response.json().await.map_err(|error| AppError::bad_request(format!("Fetch models failed: {error}")))?;
-    let models = body
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-        .map(|id| json!({ "modelId": id, "displayName": id, "type": "CHAT" }))
-        .collect::<Vec<_>>();
+    let models = match normalize_provider_type(provider).as_str() {
+        "google" => fetch_google_models(&state, provider).await?,
+        "anthropic" => fetch_anthropic_models(&state, provider).await?,
+        _ => fetch_openai_models(&state, provider).await?,
+    };
     Ok(Json(json!({ "providerId": provider_id, "models": models })))
 }
 
@@ -224,9 +208,22 @@ pub async fn provider_model_test(
         .and_then(Value::as_array)
         .and_then(|items| items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(model_ref)))
         .ok_or_else(|| AppError::not_found("Model not found"))?;
-    let non_streaming = run_chat_model_test(&state, provider, model, false).await;
-    let streaming = run_chat_model_test(&state, provider, model, true).await;
-    let tool_call = run_tool_model_test(&state, provider, model).await;
+    let provider_type = normalize_provider_type(provider);
+    let non_streaming = if provider_type == "openai" {
+        run_chat_model_test(&state, provider, model, false).await
+    } else {
+        run_direct_model_test(&state, provider, model, &provider_type).await
+    };
+    let streaming = if provider_type == "openai" {
+        run_chat_model_test(&state, provider, model, true).await
+    } else {
+        json!({ "status": "skipped", "output": "此供应商使用非流式测试" })
+    };
+    let tool_call = if provider_type == "openai" {
+        run_tool_model_test(&state, provider, model).await
+    } else {
+        json!({ "status": "skipped", "output": "此供应商暂不做工具调用测试" })
+    };
     Ok(Json(json!({
         "providerId": provider_id,
         "modelId": model_ref,
@@ -236,8 +233,41 @@ pub async fn provider_model_test(
     })))
 }
 
-pub async fn mcp_sync(Json(_request): Json<Value>) -> AppResult<Json<Value>> {
-    Ok(Json(json!({ "status": "ok", "results": [] })))
+pub async fn mcp_sync(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    Json(request): Json<Value>,
+) -> AppResult<Json<Value>> {
+    let mut settings = settings_store::read_settings(&state.config, &account.0).await?;
+    let requested = request
+        .get("serverIds")
+        .or_else(|| request.get("mcpServerIds"))
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let servers = settings
+        .get("mcpServers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut results = Vec::new();
+    let mut updated_servers = servers.clone();
+    for (index, server) in servers.iter().enumerate() {
+        let server_id = server.get("id").and_then(Value::as_str).unwrap_or_default();
+        if !requested.is_empty() && !requested.iter().any(|item| item == server_id) {
+            continue;
+        }
+        let result = mcp::sync_server_tools(&state, server).await;
+        if let Some(updated) = result.get("updatedServer").filter(|value| !value.is_null()) {
+            updated_servers[index] = updated.clone();
+        }
+        results.push(result);
+    }
+    if let Some(object) = settings.as_object_mut() {
+        object.insert("mcpServers".to_string(), Value::Array(updated_servers));
+    }
+    settings_store::write_settings(&state.config, &account.0, &settings).await?;
+    Ok(Json(json!({ "status": "ok", "results": results })))
 }
 
 pub async fn stream(
@@ -295,6 +325,84 @@ fn find_provider<'a>(settings: &'a Value, provider_id: &str) -> Option<&'a Value
         .and_then(Value::as_array)?
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(provider_id))
+}
+
+async fn fetch_openai_models(state: &AppState, provider: &Value) -> AppResult<Vec<Value>> {
+    let base = provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.openai.com/v1");
+    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or_default();
+    let response = state
+        .http
+        .get(format!("{}/models", base.trim_end_matches('/')))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Fetch models failed: {error}")))?;
+    let body = read_json_response(response, "Fetch models failed").await?;
+    Ok(body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .map(|id| json!({ "modelId": id, "displayName": id, "type": "CHAT" }))
+        .collect())
+}
+
+async fn fetch_anthropic_models(state: &AppState, provider: &Value) -> AppResult<Vec<Value>> {
+    let base = provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.anthropic.com/v1");
+    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or_default();
+    let response = state
+        .http
+        .get(format!("{}/models", base.trim_end_matches('/')))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", api_key)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Fetch models failed: {error}")))?;
+    let body = read_json_response(response, "Fetch models failed").await?;
+    Ok(body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?;
+            let name = item.get("display_name").and_then(Value::as_str).unwrap_or(id);
+            Some(json!({ "modelId": id, "displayName": name, "type": "CHAT" }))
+        })
+        .collect())
+}
+
+async fn fetch_google_models(state: &AppState, provider: &Value) -> AppResult<Vec<Value>> {
+    let base = provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://generativelanguage.googleapis.com/v1beta");
+    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or_default();
+    let response = state
+        .http
+        .get(format!("{}/models?key={}", base.trim_end_matches('/'), api_key))
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Fetch models failed: {error}")))?;
+    let body = read_json_response(response, "Fetch models failed").await?;
+    Ok(body
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let raw = item.get("name").and_then(Value::as_str)?;
+            let id = raw.strip_prefix("models/").unwrap_or(raw);
+            let display = item.get("displayName").and_then(Value::as_str).unwrap_or(id);
+            let supports_generate = item
+                .get("supportedGenerationMethods")
+                .and_then(Value::as_array)
+                .map(|methods| methods.iter().any(|method| method.as_str() == Some("generateContent")))
+                .unwrap_or(true);
+            supports_generate.then(|| json!({ "modelId": id, "displayName": display, "type": "CHAT" }))
+        })
+        .collect())
 }
 
 async fn run_chat_model_test(state: &AppState, provider: &Value, model: &Value, stream: bool) -> Value {
@@ -369,6 +477,68 @@ async fn run_tool_model_test(state: &AppState, provider: &Value, model: &Value) 
         }
         Err(error) => json!({ "status": "error", "error": error.message }),
     }
+}
+
+async fn run_direct_model_test(state: &AppState, provider: &Value, model: &Value, provider_type: &str) -> Value {
+    let result = match provider_type {
+        "anthropic" => run_anthropic_model_test(state, provider, model).await,
+        "google" => run_google_model_test(state, provider, model).await,
+        _ => Err(AppError::bad_request("unsupported provider")),
+    };
+    match result {
+        Ok(output) => json!({ "status": "success", "output": output }),
+        Err(error) => json!({ "status": "error", "error": error.message }),
+    }
+}
+
+async fn run_anthropic_model_test(state: &AppState, provider: &Value, model: &Value) -> AppResult<String> {
+    let base = provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.anthropic.com/v1");
+    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or_default();
+    let payload = json!({
+        "model": model.get("modelId").and_then(Value::as_str).unwrap_or("claude"),
+        "messages": [{ "role": "user", "content": "只回复 pong" }],
+        "max_tokens": 16,
+    });
+    let response = state
+        .http
+        .post(format!("{}/messages", base.trim_end_matches('/')))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    let body = read_json_response(response, "Provider request failed").await?;
+    Ok(body
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(160)
+        .collect())
+}
+
+async fn run_google_model_test(state: &AppState, provider: &Value, model: &Value) -> AppResult<String> {
+    let base = provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://generativelanguage.googleapis.com/v1beta");
+    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or_default();
+    let model_id = encode_google_model_id(model.get("modelId").and_then(Value::as_str).unwrap_or("gemini-2.0-flash"));
+    let payload = json!({
+        "contents": [{ "role": "user", "parts": [{ "text": "只回复 pong" }] }],
+        "generationConfig": { "maxOutputTokens": 16 },
+    });
+    let response = state
+        .http
+        .post(format!("{}/models/{}:generateContent?key={}", base.trim_end_matches('/'), model_id, api_key))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    let body = read_json_response(response, "Provider request failed").await?;
+    Ok(extract_google_text(&body).chars().take(160).collect())
 }
 
 async fn send_chat_test_request(
@@ -507,4 +677,65 @@ fn apply_custom_headers(mut request: reqwest::RequestBuilder, model: &Value) -> 
         request = request.header(name, value);
     }
     Ok(request)
+}
+
+fn normalize_provider_type(provider: &Value) -> String {
+    let raw = provider
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("openai")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    match raw.as_str() {
+        "claude" | "anthropic" => "anthropic".to_string(),
+        "google" | "gemini" => "google".to_string(),
+        _ => "openai".to_string(),
+    }
+}
+
+async fn read_json_response(response: reqwest::Response, label: &str) -> AppResult<Value> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(AppError::bad_request(format!(
+            "{label}: HTTP {} {}",
+            status.as_u16(),
+            body.chars().take(240).collect::<String>()
+        )));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| AppError::bad_request(format!("{label}: {error}")))
+}
+
+fn extract_google_text(body: &Value) -> String {
+    body.get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn encode_google_model_id(model: &str) -> String {
+    let mut out = String::new();
+    for ch in model.trim().chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => out.push(ch),
+            other => {
+                let mut buf = [0u8; 4];
+                for byte in other.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
