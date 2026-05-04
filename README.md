@@ -41,18 +41,24 @@ Rust 版已作为当前主服务运行，原 Kotlin/JVM 版不再作为生产服
 
 ## 数据目录
 
-默认生产数据目录：
+容器内默认数据目录：
 
 ```text
-/opt/rikkahub/data
+/data
 ```
 
-主要文件：
+当前 `docker-compose.yml` 的宿主机默认映射值：
 
 ```text
-/opt/rikkahub/data/rikka_hub.db
-/opt/rikkahub/data/settings.json
-/opt/rikkahub/data/accounts/<account>/settings.json
+/opt/rikkahub-data/data
+```
+
+按当前默认映射时，主要文件位于：
+
+```text
+/opt/rikkahub-data/data/rikka_hub.db
+/opt/rikkahub-data/data/settings.json
+/opt/rikkahub-data/data/accounts/<account>/settings.json
 ```
 
 数据库使用 SQLite。会话、消息、文件记录、搜索索引等结构化数据存储在数据库中。
@@ -95,10 +101,36 @@ IMGPILE_KEY=
 
 ## Docker 部署
 
-仓库内提供 `docker-compose.yml`：
+仓库内提供 `docker-compose.yml`。宿主机路径已做成可覆盖变量：
+
+```text
+RIKKAHUB_ENV_FILE
+RIKKAHUB_HOST_DATA_DIR
+RIKKAHUB_WEB_UI_DIR
+```
+
+如果不传，默认值分别是：
+
+```text
+/opt/rikkahub-data/.env
+/opt/rikkahub-data/data
+/opt/rikkahub-rs/web-ui
+```
+
+直接使用当前默认值启动：
 
 ```bash
 cd /opt/rikkahub-rs
+docker compose up --build -d
+```
+
+如果你的机器路径不同，先覆盖变量再启动：
+
+```bash
+cd /opt/rikkahub-rs
+export RIKKAHUB_ENV_FILE=/path/to/runtime.env
+export RIKKAHUB_HOST_DATA_DIR=/path/to/data
+export RIKKAHUB_WEB_UI_DIR=/path/to/web-ui
 docker compose up --build -d
 ```
 
@@ -108,10 +140,10 @@ Compose 默认映射：
 127.0.0.1:8091 -> container:8080
 ```
 
-默认挂载：
+当前默认挂载：
 
 ```text
-/opt/rikkahub/data -> /data
+/opt/rikkahub-data/data -> /data
 /opt/rikkahub-rs/web-ui -> /web-ui:ro
 ```
 
@@ -168,7 +200,7 @@ web-ui/                静态前端构建产物
 ## 维护注意
 
 - 保留 Rust/Cargo 和 Docker 构建缓存可以加速后续构建。
-- 清理磁盘时不要误删 `/opt/rikkahub/data`。
+- 清理磁盘时不要误删宿主机数据目录，当前默认值是 `/opt/rikkahub-data/data`。
 - 图片代理是流式转发，并限制并发，避免大量图片会话拖高内存。
 - 修改供应商配置页后需要点击保存；模型列表里的模型能力设置会自动保存。
 - GitHub 仓库只保存源码和静态资源，不保存真实密钥和运行数据。

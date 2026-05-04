@@ -3,7 +3,7 @@ services:
     build: .
     container_name: rikkahub-rs
     env_file:
-      - /opt/rikkahub/.env
+      - "${RIKKAHUB_ENV_FILE:-/opt/rikkahub-data/.env}"
     environment:
       HOST: 0.0.0.0
       PORT: 8080
@@ -15,6 +15,6 @@ services:
     ports:
       - "0.0.0.0:8091:8080"
     volumes:
-      - /opt/rikkahub/data:/data
-      - /opt/rikkahub-rs/web-ui:/web-ui:ro
+      - "${RIKKAHUB_HOST_DATA_DIR:-/opt/rikkahub-data/data}:/data"
+      - "${RIKKAHUB_WEB_UI_DIR:-/opt/rikkahub-rs/web-ui}:/web-ui:ro"
     restart: "no"
