@@ -89,11 +89,17 @@ fn parse_upload_response(body: &str, size_bytes: i64) -> AppResult<ImgpileUpload
 }
 
 fn fallback_url(slug: &str, media: &Value) -> Option<String> {
+    let filename = media
+        .get("filename")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(slug);
     let ext = media
         .get("ext")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())?
         .trim_start_matches('.');
-    Some(format!("{IMGPILE_CDN_FILE_BASE_URL}/{slug}.{ext}"))
+    Some(format!("{IMGPILE_CDN_FILE_BASE_URL}/{filename}.{ext}"))
 }

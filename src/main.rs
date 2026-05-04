@@ -80,6 +80,11 @@ async fn main() -> AppResult<()> {
 fn build_app(state: AppState) -> Router {
     let web_root = state.config.web_ui_dir.clone();
     let index = web_root.join("index.html");
+    let asset_service = SetResponseHeader::overriding(
+        ServeDir::new(web_root.join("assets")),
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
     let static_service = SetResponseHeader::overriding(
         ServeDir::new(web_root).fallback(ServeFile::new(index)),
         CACHE_CONTROL,
@@ -92,6 +97,7 @@ fn build_app(state: AppState) -> Router {
         .min(usize::MAX as u64) as usize;
 
     Router::new()
+        .nest_service("/assets", asset_service)
         .nest("/api", routes::api_router(state.clone()))
         .fallback_service(static_service)
         .layer(DefaultBodyLimit::max(body_limit))
