@@ -217,7 +217,7 @@ export function ChatInput({
 
   const canStop = ready && Boolean(onStop) && isGenerating && !disabled;
   const canSend = ready && !isGenerating && !disabled && !isEmpty;
-  const canUpload = ready && !disabled && !isGenerating && !uploading && !submitting;
+  const canUpload = ready && !disabled && !isGenerating && !uploading;
   const canUseToolbarControls = ready && !disabled;
   const actionDisabled = submitting || uploading || (!canStop && !canSend);
 
