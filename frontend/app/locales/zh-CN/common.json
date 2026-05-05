@@ -100,12 +100,14 @@
     "load_more": "加载更多..."
   },
   "web_auth_gate": {
-    "title": "Web API 已锁定",
-    "description": "请输入访问密码以继续使用内置网页客户端。",
+    "title": "登录",
+    "description": "请输入账号和密码以继续使用内置网页客户端。",
+    "username_placeholder": "账号",
+    "username_required": "请输入账号。",
     "password_placeholder": "访问密码",
     "password_required": "请输入访问密码。",
-    "unlock": "解锁",
-    "unlocking": "正在解锁...",
-    "unlock_failed": "Web API 解锁失败。"
+    "unlock": "登录",
+    "unlocking": "正在登录...",
+    "unlock_failed": "登录失败。"
   }
 }

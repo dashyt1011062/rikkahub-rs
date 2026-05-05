@@ -191,8 +191,8 @@ const api = {
   },
 };
 
-export async function requestWebAuthToken(password: string): Promise<WebAuthTokenResponse> {
-  const response = await api.post<WebAuthTokenResponse>("auth/token", { password });
+export async function requestWebAuthToken(username: string, password: string): Promise<WebAuthTokenResponse> {
+  const response = await api.post<WebAuthTokenResponse>("auth/token", { username, password });
   setWebAuthToken(response.token, response.expiresAt);
   return response;
 }

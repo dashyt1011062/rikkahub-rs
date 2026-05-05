@@ -10,6 +10,7 @@ import { Input } from "~/components/ui/input";
 export function WebAuthGate() {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
+  const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -20,6 +21,7 @@ export function WebAuthGate() {
       setOpen(true);
       setSubmitting(false);
       setError(null);
+      setUsername("");
       setPassword("");
     });
   }, []);
@@ -32,6 +34,10 @@ export function WebAuthGate() {
   const onSubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      if (username.trim().length === 0) {
+        setError(t("web_auth_gate.username_required"));
+        return;
+      }
       if (password.length === 0) {
         setError(t("web_auth_gate.password_required"));
         return;
@@ -40,7 +46,7 @@ export function WebAuthGate() {
       setSubmitting(true);
       setError(null);
       try {
-        await requestWebAuthToken(password);
+        await requestWebAuthToken(username.trim(), password);
         setOpen(false);
         window.location.reload();
       } catch (submitError) {
@@ -49,7 +55,7 @@ export function WebAuthGate() {
         setSubmitting(false);
       }
     },
-    [password, t],
+    [password, t, username],
   );
 
   if (!open) return null;
@@ -65,6 +71,14 @@ export function WebAuthGate() {
           <form className="space-y-3" onSubmit={onSubmit}>
             <Input
               ref={inputRef}
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder={t("web_auth_gate.username_placeholder")}
+              autoComplete="username"
+              disabled={submitting}
+            />
+            <Input
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
