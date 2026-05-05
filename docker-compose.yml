@@ -16,5 +16,4 @@ services:
       - "0.0.0.0:8091:8080"
     volumes:
       - "${RIKKAHUB_HOST_DATA_DIR:-/opt/rikkahub-data/data}:/data"
-      - "${RIKKAHUB_WEB_UI_DIR:-/opt/rikkahub-rs/web-ui}:/web-ui:ro"
     restart: "no"

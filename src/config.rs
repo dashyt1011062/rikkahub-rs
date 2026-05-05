@@ -40,7 +40,7 @@ impl AppConfig {
             "DB_PATH",
             data_dir.join("rikka_hub.db").to_string_lossy().as_ref(),
         ));
-        let web_ui_dir = PathBuf::from(env_value("WEB_UI_DIR", "web-ui"));
+        let web_ui_dir = PathBuf::from(env_value("WEB_UI_DIR", "dist/web-ui-static"));
         let jwt_enabled = env_bool("JWT_ENABLED", false);
         let access_password = env_value("ACCESS_PASSWORD", "");
         let upload_max_mb = env_value("UPLOAD_MAX_MB", "20").parse::<u64>().unwrap_or(20);
@@ -187,4 +187,3 @@ fn sanitize_account_path_segment(account_id: &str) -> String {
         sanitized
     }
 }
-

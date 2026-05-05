@@ -1,14 +1,19 @@
 # syntax=docker/dockerfile:1.7
 
+FROM node:20-bookworm-slim AS web-build
+
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-fund --no-audit
+COPY frontend ./
+RUN npm run build
+
 FROM rust:1-bookworm AS build
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
-RUN --mount=type=cache,id=rikkahub-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=rikkahub-cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=rikkahub-target,target=/app/target \
-    cargo build --release \
+RUN cargo build --release \
     && cp /app/target/release/rikkahub-rs /tmp/rikkahub-rs
 
 FROM debian:bookworm-slim AS runtime
@@ -18,6 +23,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /tmp/rikkahub-rs /usr/local/bin/rikkahub-rs
+COPY --from=web-build /app/dist/web-ui-static /web-ui
 
 ENV HOST=0.0.0.0 \
     PORT=8080 \

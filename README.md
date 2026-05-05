@@ -1,6 +1,6 @@
 # RikkaHub Web Rust
 
-这是 RikkaHub Web 的 Rust 后端重写版，用低内存 Rust 服务替代原 JVM 后端，并复用现有的 Web UI 静态资源。
+这是 RikkaHub Web 的 Rust 后端重写版，用低内存 Rust 服务替代原 JVM 后端，并带回可维护的 React/Vite 前端源码工程。
 
 当前 VPS 上的生产入口：
 
@@ -31,13 +31,12 @@ Rust 版已作为当前主服务运行，原 Kotlin/JVM 版不再作为生产服
 - 图片上传、图片消息、远程图片代理展示。
 - 生图结果保存到远程图床。
 - 备份导出和导入。
-- 静态 Web UI 托管。
+- React/Vite 前端源码构建与静态 Web UI 托管。
 
 暂未重点迁移或仍可继续完善的部分：
 
-- 高级设置、Memory、Prompt、Assistant 行为等深层配置。
 - 与原版 RikkaHub 的全部边缘功能完全对齐。
-- 前端仍以构建后的静态资源为主，后续如要长期维护，建议恢复或重建前端源码工程。
+- 高级设置、Memory、Prompt、Assistant 行为等深层配置还可继续打磨。
 
 ## 数据目录
 
@@ -73,7 +72,7 @@ Rust 版已作为当前主服务运行，原 Kotlin/JVM 版不再作为生产服
 HOST=0.0.0.0
 PORT=8080
 DATA_DIR=/data
-WEB_UI_DIR=/web-ui
+WEB_UI_DIR=dist/web-ui-static
 JWT_ENABLED=true
 ACCESS_PASSWORD=change-me
 WEB_ACCOUNTS=1953939569:change-me
@@ -87,7 +86,7 @@ IMGPILE_KEY=
 - `HOST` / `PORT`：服务监听地址和端口。
 - `DATA_DIR`：数据目录。
 - `DB_PATH`：可选，覆盖默认数据库路径。
-- `WEB_UI_DIR`：静态前端目录。
+- `WEB_UI_DIR`：静态前端目录；本地默认读取 `dist/web-ui-static`。
 - `JWT_ENABLED`：是否启用登录鉴权。
 - `ACCESS_PASSWORD`：默认账户密码，对应默认账户 `2819915628`。
 - `WEB_ACCOUNTS`：额外账户，格式为 `username:password`，可用逗号、分号或换行分隔。
@@ -106,7 +105,6 @@ IMGPILE_KEY=
 ```text
 RIKKAHUB_ENV_FILE
 RIKKAHUB_HOST_DATA_DIR
-RIKKAHUB_WEB_UI_DIR
 ```
 
 如果不传，默认值分别是：
@@ -114,7 +112,6 @@ RIKKAHUB_WEB_UI_DIR
 ```text
 /opt/rikkahub-data/.env
 /opt/rikkahub-data/data
-/opt/rikkahub-rs/web-ui
 ```
 
 直接使用当前默认值启动：
@@ -130,7 +127,6 @@ docker compose up --build -d
 cd /opt/rikkahub-rs
 export RIKKAHUB_ENV_FILE=/path/to/runtime.env
 export RIKKAHUB_HOST_DATA_DIR=/path/to/data
-export RIKKAHUB_WEB_UI_DIR=/path/to/web-ui
 docker compose up --build -d
 ```
 
@@ -144,13 +140,12 @@ Compose 默认映射：
 
 ```text
 /opt/rikkahub-data/data -> /data
-/opt/rikkahub-rs/web-ui -> /web-ui:ro
 ```
 
 当前 VPS 生产容器名：
 
 ```text
-rikkahub-rs-preview
+rikkahub-rs
 ```
 
 当前 VPS 使用 Cloudflare 反代到本机 `127.0.0.1:8091`，公网只保留：
@@ -161,10 +156,12 @@ https://rikkahub.wuji.us.eu.org
 
 ## 本地开发
 
-直接运行：
+先构建前端，再直接运行：
 
 ```bash
 cd /opt/rikkahub-rs
+npm --prefix frontend install
+npm --prefix frontend run build
 cargo run
 ```
 
@@ -182,6 +179,14 @@ cargo build --release
 docker compose build
 ```
 
+前端单独开发：
+
+```bash
+cd /opt/rikkahub-rs/frontend
+npm install
+npm run dev
+```
+
 ## 代码结构
 
 ```text
@@ -194,7 +199,8 @@ src/
   mcp.rs               MCP 工具同步和调用
   routes/              HTTP API 路由
   imgpile.rs           Imgpile 上传适配
-web-ui/                静态前端构建产物
+frontend/              React Router 7 + Vite 前端源码
+dist/web-ui-static/    前端构建产物（可重新生成）
 ```
 
 ## 维护注意

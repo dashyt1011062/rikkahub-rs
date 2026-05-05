@@ -1,0 +1,10 @@
+.git
+target
+.cargo-registry
+.cargo-home
+.env
+.env.*
+dist
+frontend/node_modules
+frontend/.react-router
+frontend/build
