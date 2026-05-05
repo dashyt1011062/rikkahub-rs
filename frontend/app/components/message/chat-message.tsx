@@ -73,29 +73,11 @@ function hasRenderablePart(part: UIMessagePart): boolean {
   }
 }
 
-function formatPartForCopy(part: UIMessagePart, t: TFunction): string | null {
-  switch (part.type) {
-    case "text":
-      return part.text;
-    case "image":
-      return `[${t("chat_message.copy_image")}] ${part.url}`;
-    case "video":
-      return `[${t("chat_message.copy_video")}] ${part.url}`;
-    case "audio":
-      return `[${t("chat_message.copy_audio")}] ${part.url}`;
-    case "document":
-      return `[${t("chat_message.copy_document")}] ${part.fileName}`;
-    case "reasoning":
-      return part.reasoning;
-    case "tool":
-      return `[${t("chat_message.copy_tool")}] ${part.toolName}`;
-  }
-}
-
-function buildCopyText(parts: UIMessagePart[], t: TFunction): string {
+function buildCopyText(parts: UIMessagePart[]): string {
   return parts
-    .map((part) => formatPartForCopy(part, t))
-    .filter((value): value is string => Boolean(value && value.trim().length > 0))
+    .filter((part): part is Extract<UIMessagePart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .filter((value) => value.trim().length > 0)
     .join("\n\n")
     .trim();
 }
@@ -209,10 +191,10 @@ const ChatMessageActionsRow = React.memo(({
   const [forking, setForking] = React.useState(false);
 
   const handleCopy = React.useCallback(async () => {
-    const text = buildCopyText(message.parts, t);
+    const text = buildCopyText(message.parts);
     if (!text || typeof navigator === "undefined" || !navigator.clipboard) return;
     await navigator.clipboard.writeText(text);
-  }, [message.parts, t]);
+  }, [message.parts]);
 
   const handleRegenerate = React.useCallback(async () => {
     if (!onRegenerate) return;
