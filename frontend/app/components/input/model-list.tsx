@@ -5,6 +5,7 @@ import { Check, ChevronDown, Heart, LoaderCircle, Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
+import { useIsMobile } from "~/hooks/use-mobile";
 import { getModelDisplayName } from "~/lib/display";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
@@ -22,6 +23,14 @@ import {
 } from "~/components/ui/popover";
 import { Input } from "~/components/ui/input";
 import { ScrollArea } from "~/components/ui/scroll-area";
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+  DrawerTrigger,
+} from "~/components/ui/drawer";
 
 export interface ModelListProps {
   disabled?: boolean;
@@ -162,6 +171,7 @@ function ModelOptionRow({
 export function ModelList({ disabled = false, className, onChanged }: ModelListProps) {
   const { t } = useTranslation("input");
   const { settings, currentAssistant } = useCurrentAssistant();
+  const isMobile = useIsMobile();
 
   const [open, setOpen] = React.useState(false);
   const [searchKeywords, setSearchKeywords] = React.useState("");
@@ -346,41 +356,159 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
     [disabled, favoriteModelIds, settings, t],
   );
 
-  return (
-    <Popover
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (disabled || !currentAssistant) {
-          setOpen(false);
-          return;
-        }
-
-        setOpen(nextOpen);
-      }}
+  const trigger = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className={cn(
+        "rounded-full px-0 text-muted-foreground hover:text-foreground sm:h-8 sm:max-w-64 sm:justify-start sm:gap-2 sm:px-2",
+        className,
+      )}
+      disabled={disabled || !currentAssistant}
     >
-      <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "rounded-full px-0 text-muted-foreground hover:text-foreground sm:h-8 sm:max-w-64 sm:justify-start sm:gap-2 sm:px-2",
-            className,
-          )}
-          disabled={disabled || !currentAssistant}
-        >
-          <AIIcon
-            name={currentModel?.modelId ?? "auto"}
-            size={16}
-            className="bg-transparent"
-            imageClassName="h-full w-full"
-          />
-          <span className="hidden min-w-0 flex-1 truncate text-left sm:block">
-            {currentModelLabel}
-          </span>
-          <ChevronDown className="hidden size-3.5 shrink-0 sm:block" />
-        </Button>
-      </PopoverTrigger>
+      <AIIcon
+        name={currentModel?.modelId ?? "auto"}
+        size={16}
+        className="bg-transparent"
+        imageClassName="h-full w-full"
+      />
+      <span className="hidden min-w-0 flex-1 truncate text-left sm:block">
+        {currentModelLabel}
+      </span>
+      <ChevronDown className="hidden size-3.5 shrink-0 sm:block" />
+    </Button>
+  );
+
+  const bodyHeightClass = isMobile ? "h-[min(68dvh,32rem)]" : "h-[24rem]";
+
+  const panelContent = (
+    <>
+      <div className="relative">
+        <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
+        <Input
+          value={searchKeywords}
+          onChange={(event) => {
+            setSearchKeywords(event.target.value);
+          }}
+          placeholder={t("model_list.search_placeholder")}
+          className="h-8 pl-7 text-xs"
+        />
+      </div>
+
+      {error ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+          {error}
+        </div>
+      ) : null}
+
+      <div className={cn("min-h-0 flex-1", bodyHeightClass)}>
+        {sections.length === 0 && favoriteModels.length === 0 ? (
+          <div className="rounded-md border border-dashed px-3 py-8 text-center text-sm text-muted-foreground">
+            {t("model_list.empty")}
+          </div>
+        ) : (
+          <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
+            <ScrollArea className="max-h-24 w-full shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5 pb-1">
+                {favoriteModels.length > 0 && (
+                  <button
+                    type="button"
+                    className={cn(
+                      "bg-muted/60 hover:bg-muted inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
+                      isFavoriteSectionSelected && "border-primary bg-primary/10 text-primary",
+                    )}
+                    onClick={() => {
+                      setSelectedProviderId(FAVORITE_SECTION_ID);
+                    }}
+                  >
+                    <Heart className={cn("size-3", isFavoriteSectionSelected && "fill-current")} />
+                    <span>{t("model_list.favorites")}</span>
+                  </button>
+                )}
+
+                {sections.map((section) => {
+                  const selected = section.providerId === selectedProviderId;
+                  return (
+                    <button
+                      key={section.providerId}
+                      type="button"
+                      className={cn(
+                        "bg-muted/60 hover:bg-muted inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
+                        selected && "border-primary bg-primary/10 text-primary",
+                      )}
+                      onClick={() => {
+                        setSelectedProviderId(section.providerId);
+                      }}
+                    >
+                      <AIIcon
+                        name={section.providerName}
+                        size={12}
+                        className="bg-transparent"
+                        imageClassName="h-full w-full"
+                      />
+                      <span className="truncate">{section.providerName}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </ScrollArea>
+
+            <ScrollArea className="min-h-0 flex-1 rounded-md border">
+              <div className="space-y-1 p-1.5">
+                {displayedModels.map((model) => (
+                  <ModelOptionRow
+                    key={model.id}
+                    model={model}
+                    selected={model.id === currentModelId}
+                    updating={model.id === updatingModelId}
+                    favorite={favoriteModelIdSet.has(model.id)}
+                    disabled={disabled || updatingModelId !== null}
+                    onSelect={handleSelectModel}
+                    onToggleFavorite={handleToggleFavorite}
+                    t={t}
+                  />
+                ))}
+              </div>
+            </ScrollArea>
+          </div>
+        )}
+      </div>
+    </>
+  );
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (disabled || !currentAssistant) {
+      setOpen(false);
+      return;
+    }
+
+    setOpen(nextOpen);
+  };
+
+  if (isMobile) {
+    return (
+      <Drawer direction="bottom" open={open} onOpenChange={handleOpenChange}>
+        <DrawerTrigger asChild>{trigger}</DrawerTrigger>
+        <DrawerContent className="h-[min(82dvh,42rem)] max-h-[82dvh] p-0">
+          <DrawerHeader className="border-b px-4 py-3 text-left">
+            <DrawerTitle className="text-sm">{t("model_list.title")}</DrawerTitle>
+            <DrawerDescription className="text-xs">
+              {t("model_list.description")}
+            </DrawerDescription>
+          </DrawerHeader>
+
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-3">
+            {panelContent}
+          </div>
+        </DrawerContent>
+      </Drawer>
+    );
+  }
+
+  return (
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
 
       <PopoverContent
         align="end"
@@ -396,97 +524,8 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
           </PopoverDescription>
         </PopoverHeader>
 
-        <div className="space-y-2 px-3 py-3">
-          <div className="relative">
-            <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
-            <Input
-              value={searchKeywords}
-              onChange={(event) => {
-                setSearchKeywords(event.target.value);
-              }}
-              placeholder={t("model_list.search_placeholder")}
-              className="h-8 pl-7 text-xs"
-            />
-          </div>
-
-          {error ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
-              {error}
-            </div>
-          ) : null}
-
-          <div className="h-[24rem]">
-            {sections.length === 0 && favoriteModels.length === 0 ? (
-              <div className="rounded-md border border-dashed px-3 py-8 text-center text-sm text-muted-foreground">
-                {t("model_list.empty")}
-              </div>
-            ) : (
-              <div className="flex h-full min-h-0 flex-col gap-2">
-                <ScrollArea className="max-h-20 w-full">
-                  <div className="flex flex-wrap items-center gap-1.5 pb-1">
-                    {favoriteModels.length > 0 && (
-                      <button
-                        type="button"
-                        className={cn(
-                          "bg-muted/60 hover:bg-muted inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
-                          isFavoriteSectionSelected && "border-primary bg-primary/10 text-primary",
-                        )}
-                        onClick={() => {
-                          setSelectedProviderId(FAVORITE_SECTION_ID);
-                        }}
-                      >
-                        <Heart className={cn("size-3", isFavoriteSectionSelected && "fill-current")} />
-                        <span>{t("model_list.favorites")}</span>
-                      </button>
-                    )}
-
-                    {sections.map((section) => {
-                      const selected = section.providerId === selectedProviderId;
-                      return (
-                        <button
-                          key={section.providerId}
-                          type="button"
-                          className={cn(
-                            "bg-muted/60 hover:bg-muted inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
-                            selected && "border-primary bg-primary/10 text-primary",
-                          )}
-                          onClick={() => {
-                            setSelectedProviderId(section.providerId);
-                          }}
-                        >
-                          <AIIcon
-                            name={section.providerName}
-                            size={12}
-                            className="bg-transparent"
-                            imageClassName="h-full w-full"
-                          />
-                          <span className="truncate">{section.providerName}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </ScrollArea>
-
-                <ScrollArea className="min-h-0 flex-1 rounded-md border">
-                  <div className="space-y-1 p-1.5">
-                    {displayedModels.map((model) => (
-                      <ModelOptionRow
-                        key={model.id}
-                        model={model}
-                        selected={model.id === currentModelId}
-                        updating={model.id === updatingModelId}
-                        favorite={favoriteModelIdSet.has(model.id)}
-                        disabled={disabled || updatingModelId !== null}
-                        onSelect={handleSelectModel}
-                        onToggleFavorite={handleToggleFavorite}
-                        t={t}
-                      />
-                    ))}
-                  </div>
-                </ScrollArea>
-              </div>
-            )}
-          </div>
+        <div className="flex min-h-0 flex-col gap-2 overflow-hidden px-3 py-3">
+          {panelContent}
         </div>
       </PopoverContent>
     </Popover>
