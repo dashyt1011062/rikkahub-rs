@@ -29,7 +29,7 @@ Rust 版已作为当前主服务运行，原 Kotlin/JVM 版不再作为生产服
 - 自动标题总结和手动重新生成标题。
 - MCP 服务器配置、工具同步和工具调用。
 - 图片上传、图片消息、远程图片代理展示。
-- 生图结果保存到远程图床。
+- 生图结果可按存储后端保存到本地或远程图床。
 - 备份导出和导入。
 - React/Vite 前端源码构建与静态 Web UI 托管。
 
@@ -62,7 +62,7 @@ Rust 版已作为当前主服务运行，原 Kotlin/JVM 版不再作为生产服
 
 数据库使用 SQLite。会话、消息、文件记录、搜索索引等结构化数据存储在数据库中。
 
-图片默认不落盘保存到 VPS，本地数据库只保存文件记录和远程地址。前端展示图片时优先通过当前 VPS 的代理接口流式转发，避免直接暴露或回退到带水印直链。
+仓库默认使用本地文件存储。上传文件和图片会保存到数据目录下的 `upload/`，数据库只保存文件记录。前端展示图片时通过当前 VPS 的文件接口读取；如果切换到远程图床模式，则优先通过当前 VPS 的代理接口流式转发。
 
 ## 环境变量
 
@@ -77,7 +77,7 @@ JWT_ENABLED=true
 ACCESS_PASSWORD=change-me
 WEB_ACCOUNTS=1953939569:change-me
 UPLOAD_MAX_MB=100
-FILE_STORAGE=imgpile
+FILE_STORAGE=local
 IMGPILE_KEY=
 ```
 
@@ -91,8 +91,8 @@ IMGPILE_KEY=
 - `ACCESS_PASSWORD`：默认账户密码，对应默认账户 `2819915628`。
 - `WEB_ACCOUNTS`：额外账户，格式为 `username:password`，可用逗号、分号或换行分隔。
 - `UPLOAD_MAX_MB`：上传文件大小限制。
-- `FILE_STORAGE`：文件存储后端，当前生产使用 `imgpile`。
-- `IMGPILE_KEY`：Imgpile API Key。
+- `FILE_STORAGE`：文件存储后端，默认 `local`；如需图床可改成 `imgpile`。
+- `IMGPILE_KEY`：仅当 `FILE_STORAGE=imgpile` 时需要填写。
 - `MAX_REMOTE_FILE_PROXIES`：远程图片代理并发数，默认 `10`。
 - `MAX_REMOTE_FILE_PROXY_MB`：单个远程代理文件大小限制，默认 `64`。
 

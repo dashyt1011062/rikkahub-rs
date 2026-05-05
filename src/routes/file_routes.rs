@@ -16,7 +16,7 @@ use tokio_util::io::ReaderStream;
 use crate::auth::AccountId;
 use crate::db::{self, ManagedFileRecord};
 use crate::error::{AppError, AppResult};
-use crate::imgpile;
+use crate::file_storage;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -70,33 +70,20 @@ pub async fn upload(
                 state.config.upload_max_bytes / (1024 * 1024)
             )));
         }
-        let upload = imgpile::upload_bytes(
-            state.http.clone(),
-            state.config.imgpile_key.clone(),
-            bytes,
-            file_name.clone(),
-            mime_type.clone(),
-        )
-        .await?;
-        let record = db::insert_remote_file(
-            state.config.db_path.clone(),
+        let stored = file_storage::store_bytes(
+            &state,
             account.0.clone(),
             file_name,
             mime_type.clone(),
-            upload.size_bytes,
-            "imgpile".to_string(),
-            upload.original_url.clone(),
-            upload.page_url,
-            upload.delete_url,
-            upload.thumbnail_url,
+            bytes,
         )
         .await?;
         files.push(db::UploadedFileDto {
-            id: record.id,
-            url: upload.original_url,
-            file_name: record.display_name,
+            id: stored.record.id,
+            url: stored.url,
+            file_name: stored.record.display_name,
             mime: mime_type,
-            size: record.size_bytes,
+            size: stored.record.size_bytes,
         });
     }
     if files.is_empty() {
@@ -110,6 +97,8 @@ pub async fn delete_by_id(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<i64>,
 ) -> AppResult<axum::Json<Value>> {
+    let file = db::get_file_by_id(state.config.db_path.clone(), account.0.clone(), id).await?;
+    file_storage::delete_local_file_if_present(&state.config.data_dir, &file).await?;
     let deleted = db::delete_file_record(state.config.db_path.clone(), account.0, id).await?;
     if !deleted {
         return Err(AppError::not_found("File not found"));

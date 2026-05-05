@@ -444,6 +444,51 @@ pub async fn insert_remote_file(
     .map_err(|error| AppError::internal(format!("file insert task failed: {error}")))?
 }
 
+pub async fn insert_local_file(
+    db_path: PathBuf,
+    account_id: String,
+    display_name: String,
+    mime_type: String,
+    size_bytes: i64,
+    storage_provider: String,
+) -> AppResult<ManagedFileRecord> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        let safe_name = sanitize_display_name(&display_name);
+        let relative_path = unique_upload_relative_path(&safe_name);
+        let now = now_millis();
+        conn.execute(
+            "INSERT INTO managed_files (
+                account_id, folder, relative_path, storage_provider, remote_url, page_url, delete_url, thumbnail_url,
+                display_name, mime_type, size_bytes, created_at, updated_at
+             ) VALUES (?1, 'upload', ?2, ?3, NULL, NULL, NULL, NULL, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                account_id,
+                relative_path,
+                storage_provider,
+                safe_name,
+                mime_type,
+                size_bytes,
+                now,
+                now,
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        Ok(ManagedFileRecord {
+            id,
+            relative_path,
+            storage_provider,
+            remote_url: None,
+            display_name: safe_name,
+            mime_type,
+            size_bytes,
+            account_id,
+        })
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("local file insert task failed: {error}")))?
+}
+
 pub async fn delete_file_record(db_path: PathBuf, account_id: String, id: i64) -> AppResult<bool> {
     task::spawn_blocking(move || {
         let conn = open_connection(&db_path)?;

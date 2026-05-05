@@ -4,6 +4,7 @@ mod db;
 mod engine;
 mod error;
 mod events;
+mod file_storage;
 mod imgpile;
 mod llm;
 mod mcp;

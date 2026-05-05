@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 
 use crate::db::{self, ConversationDto, MessageDto};
 use crate::error::{AppError, AppResult};
-use crate::imgpile;
+use crate::file_storage;
 use crate::mcp::{self, AvailableTool};
 use crate::AppState;
 
@@ -229,7 +229,9 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
             stored.push(part);
             continue;
         }
-        if raw_url.starts_with("https://cdn.imgpile.com/") || raw_url.starts_with("http://cdn.imgpile.com/") {
+        if file_storage::uses_imgpile_storage(&state.config.file_storage)
+            && (raw_url.starts_with("https://cdn.imgpile.com/") || raw_url.starts_with("http://cdn.imgpile.com/"))
+        {
             let mime_type = detect_mime_from_url(&raw_url).to_string();
             let file_name = format!("generated-image-{}-{}.{}", db::now_millis(), index, extension_for_mime(&mime_type));
             let record = db::insert_remote_file(
@@ -245,7 +247,7 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
                 None,
             )
             .await?;
-            stored.push(with_generated_file_metadata(part, record.id, &raw_url));
+            stored.push(with_generated_file_metadata(part, record.id, &raw_url, "imgpile"));
             index += 1;
             continue;
         }
@@ -254,28 +256,20 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
             continue;
         };
         let file_name = format!("generated-image-{}-{}.{}", db::now_millis(), index, extension_for_mime(&mime_type));
-        let upload = imgpile::upload_bytes(
-            state.http.clone(),
-            state.config.imgpile_key.clone(),
-            bytes.clone(),
+        let stored_file = file_storage::store_bytes(
+            state,
+            account_id.to_string(),
             file_name.clone(),
             mime_type.clone(),
+            bytes,
         )
         .await?;
-        let record = db::insert_remote_file(
-            state.config.db_path.clone(),
-            account_id.to_string(),
-            file_name,
-            mime_type,
-            upload.size_bytes,
-            "imgpile".to_string(),
-            upload.original_url.clone(),
-            upload.page_url,
-            upload.delete_url,
-            upload.thumbnail_url,
-        )
-        .await?;
-        stored.push(with_generated_file_metadata(part, record.id, &upload.original_url));
+        stored.push(with_generated_file_metadata(
+            part,
+            stored_file.record.id,
+            &stored_file.url,
+            &stored_file.record.storage_provider,
+        ));
         index += 1;
     }
     Ok(stored)
@@ -914,8 +908,16 @@ async fn resolve_part_image_url(state: &AppState, account_id: &str, part: &Value
         )
         .await
         {
-            if let Some(remote) = file.remote_url.filter(|value| !value.trim().is_empty()) {
+            if let Some(remote) = file
+                .remote_url
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+            {
                 return Ok(Some(remote));
+            }
+            if let Some((bytes, mime)) = file_storage::read_local_file_bytes(&state.config.data_dir, &file).await? {
+                return Ok(Some(format!("data:{};base64,{}", mime, BASE64.encode(&bytes))));
             }
         }
     }
@@ -1687,7 +1689,7 @@ fn image_part(url: &str, generated: bool) -> Value {
     }
 }
 
-fn with_generated_file_metadata(part: Value, file_id: i64, url: &str) -> Value {
+fn with_generated_file_metadata(part: Value, file_id: i64, url: &str, storage_provider: &str) -> Value {
     let mut next = part.as_object().cloned().unwrap_or_default();
     next.insert("url".to_string(), Value::String(url.to_string()));
     let mut metadata = next
@@ -1697,7 +1699,7 @@ fn with_generated_file_metadata(part: Value, file_id: i64, url: &str) -> Value {
         .unwrap_or_default();
     metadata.insert("generatedImage".to_string(), Value::Bool(true));
     metadata.insert("fileId".to_string(), Value::Number(file_id.into()));
-    metadata.insert("storageProvider".to_string(), Value::String("imgpile".to_string()));
+    metadata.insert("storageProvider".to_string(), Value::String(storage_provider.to_string()));
     next.insert("metadata".to_string(), Value::Object(metadata));
     Value::Object(next)
 }
