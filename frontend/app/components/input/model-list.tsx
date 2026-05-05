@@ -382,7 +382,13 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
         </Button>
       </PopoverTrigger>
 
-      <PopoverContent align="end" className="w-[min(96vw,30rem)] gap-0 p-0">
+      <PopoverContent
+        align="end"
+        className="w-[min(96vw,30rem)] gap-0 p-0"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+        }}
+      >
         <PopoverHeader className="border-b px-4 py-3">
           <PopoverTitle className="text-sm">{t("model_list.title")}</PopoverTitle>
           <PopoverDescription className="text-xs">

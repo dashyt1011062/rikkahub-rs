@@ -2,19 +2,21 @@ import * as React from "react";
 import { AudioLines, VolumeX } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { resolveFileUrl } from "~/lib/files";
+import { resolveManagedFileUrl } from "~/lib/files";
+import type { MessagePartMetadata } from "~/types";
 
 interface AudioPartProps {
   url: string;
+  metadata?: MessagePartMetadata | null;
 }
 
-export function AudioPart({ url }: AudioPartProps) {
+export function AudioPart({ url, metadata }: AudioPartProps) {
   const { t } = useTranslation("message");
   const [error, setError] = React.useState(false);
 
   if (!url) return null;
 
-  const audioUrl = resolveFileUrl(url);
+  const audioUrl = resolveManagedFileUrl(url, metadata);
 
   if (error) {
     return (

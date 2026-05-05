@@ -2,19 +2,21 @@ import * as React from "react";
 import { Video, VideoOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { resolveFileUrl } from "~/lib/files";
+import { resolveManagedFileUrl } from "~/lib/files";
+import type { MessagePartMetadata } from "~/types";
 
 interface VideoPartProps {
   url: string;
+  metadata?: MessagePartMetadata | null;
 }
 
-export function VideoPart({ url }: VideoPartProps) {
+export function VideoPart({ url, metadata }: VideoPartProps) {
   const { t } = useTranslation("message");
   const [error, setError] = React.useState(false);
 
   if (!url) return null;
 
-  const videoUrl = resolveFileUrl(url);
+  const videoUrl = resolveManagedFileUrl(url, metadata);
 
   if (error) {
     return (

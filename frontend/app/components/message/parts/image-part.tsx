@@ -1,15 +1,17 @@
 import * as React from "react";
 import { ImageOff } from "lucide-react";
-import { resolveFileUrl } from "~/lib/files";
+import { resolveManagedFileUrl } from "~/lib/files";
+import type { MessagePartMetadata } from "~/types";
 
 interface ImagePartProps {
   url: string;
+  metadata?: MessagePartMetadata | null;
 }
 
-export function ImagePart({ url }: ImagePartProps) {
+export function ImagePart({ url, metadata }: ImagePartProps) {
   const [error, setError] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
-  const imageUrl = resolveFileUrl(url);
+  const imageUrl = resolveManagedFileUrl(url, metadata);
 
   if (!url) return null;
 
@@ -17,7 +19,7 @@ export function ImagePart({ url }: ImagePartProps) {
     return (
       <div className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
         <ImageOff className="h-4 w-4" />
-        <span>Failed to load image: {resolveFileUrl(url)}</span>
+        <span>Failed to load image: {imageUrl}</span>
       </div>
     );
   }

@@ -1127,7 +1127,7 @@ function ConversationsPageInner() {
 
   const chatContent = (
     <div
-      className={cn("flex flex-1 flex-col min-h-0 overflow-hidden", isNewChat && "justify-center")}
+      className={cn("flex flex-1 min-h-0 flex-col overflow-hidden", isNewChat && "justify-end")}
     >
       {!isNewChat && (
         <div className="relative flex min-h-0 flex-1">

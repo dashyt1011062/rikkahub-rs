@@ -8,8 +8,14 @@ export type ToolApprovalState =
   | { type: "approved" }
   | { type: "denied"; reason: string };
 
+export interface MessagePartMetadata extends Record<string, unknown> {
+  fileId?: number | string | null;
+  generatedImage?: boolean;
+  storageProvider?: string;
+}
+
 interface BaseMessagePart {
-  metadata?: Record<string, unknown> | null;
+  metadata?: MessagePartMetadata | null;
 }
 
 export interface TextPart extends BaseMessagePart {

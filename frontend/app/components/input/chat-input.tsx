@@ -30,7 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Textarea } from "~/components/ui/textarea";
-import { resolveFileUrl } from "~/lib/files";
+import { resolveManagedFileUrl } from "~/lib/files";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
 import type { UIMessagePart, UploadFilesResponseDto } from "~/types";
@@ -498,7 +498,7 @@ export function ChatInput({
                       <img
                         alt="upload"
                         className="size-5 rounded object-cover"
-                        src={resolveFileUrl(part.url)}
+                        src={resolveManagedFileUrl(part.url, part.metadata)}
                       />
                     ) : (
                       partIcon(part)

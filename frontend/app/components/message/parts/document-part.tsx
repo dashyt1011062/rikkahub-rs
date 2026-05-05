@@ -1,11 +1,13 @@
 import { File, FileText } from "lucide-react";
 
-import { resolveFileUrl } from "~/lib/files";
+import { resolveManagedFileUrl } from "~/lib/files";
+import type { MessagePartMetadata } from "~/types";
 
 interface DocumentPartProps {
   url: string;
   fileName: string;
   mime: string;
+  metadata?: MessagePartMetadata | null;
 }
 
 function getDocumentIcon(mime: string) {
@@ -18,10 +20,10 @@ function getDocumentIcon(mime: string) {
   return <File className="h-4 w-4" />;
 }
 
-export function DocumentPart({ url, fileName, mime }: DocumentPartProps) {
+export function DocumentPart({ url, fileName, mime, metadata }: DocumentPartProps) {
   if (!url) return null;
 
-  const documentUrl = resolveFileUrl(url);
+  const documentUrl = resolveManagedFileUrl(url, metadata);
 
   return (
     <a
