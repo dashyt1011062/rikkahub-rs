@@ -66,6 +66,7 @@ function InfiniteScrollArea({
         hasMore={hasMore}
         loader={effectiveLoader}
         scrollableTarget={scrollTargetId}
+        style={{ overflow: "visible" }}
       >
         {children}
       </InfiniteScroll>

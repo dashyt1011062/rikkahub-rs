@@ -82,6 +82,16 @@ pub struct MessageSearchResultDto {
     pub snippet: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSearchResultDto {
+    pub conversation_id: String,
+    pub title: String,
+    pub update_at: i64,
+    pub is_pinned: bool,
+    pub snippet: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedFileRecord {
     pub id: i64,
@@ -252,6 +262,57 @@ pub async fn search_messages(db_path: PathBuf, account_id: String, query: String
     })
     .await
     .map_err(|error| AppError::internal(format!("message search task failed: {error}")))??;
+    Ok(rows)
+}
+
+pub async fn search_conversations(
+    db_path: PathBuf,
+    account_id: String,
+    assistant_id: String,
+    query: String,
+    limit: i64,
+) -> AppResult<Vec<ConversationSearchResultDto>> {
+    let rows = task::spawn_blocking(move || -> AppResult<Vec<ConversationSearchResultDto>> {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = open_readonly(&db_path)?;
+        let title_matches = search_conversation_titles(&conn, &account_id, &assistant_id, &query, limit)?;
+        let content_limit = (limit.saturating_mul(5)).clamp(limit, 500);
+        let content_matches = search_conversation_content(&conn, &account_id, &assistant_id, &query, content_limit)
+            .or_else(|_| search_conversation_content_like(&conn, &account_id, &assistant_id, &query, content_limit))?;
+
+        let mut merged = std::collections::HashMap::<String, ConversationSearchResultDto>::new();
+        for item in title_matches.into_iter().chain(content_matches) {
+            let key = item.conversation_id.clone();
+            match merged.get_mut(&key) {
+                Some(existing) => {
+                    if existing.snippet.trim().is_empty() || existing.snippet == existing.title {
+                        existing.snippet = item.snippet;
+                    }
+                    existing.update_at = existing.update_at.max(item.update_at);
+                    existing.is_pinned = existing.is_pinned || item.is_pinned;
+                }
+                None => {
+                    merged.insert(key, item);
+                }
+            }
+        }
+
+        let mut items = merged.into_values().collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            right
+                .is_pinned
+                .cmp(&left.is_pinned)
+                .then_with(|| right.update_at.cmp(&left.update_at))
+        });
+        items.truncate(limit.max(0) as usize);
+        Ok(items)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("conversation search task failed: {error}")))??;
     Ok(rows)
 }
 
@@ -531,7 +592,7 @@ pub async fn rebuild_message_search_index(db_path: PathBuf) -> AppResult<()> {
             for row in rows {
                 let (node_id, conversation_id, messages_raw, title, update_at) = row?;
                 for message in parse_messages(&messages_raw) {
-                    let text = extract_search_text(&message);
+                    let text = build_search_text(&title, &message);
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -698,7 +759,7 @@ fn replace_message_search_index(conn: &Connection, conversation: &ConversationDt
     )?;
     for node in &conversation.messages {
         for message in &node.messages {
-            let text = extract_search_text(message);
+            let text = build_search_text(&conversation.title, message);
             if text.trim().is_empty() {
                 continue;
             }
@@ -715,7 +776,7 @@ fn replace_message_search_index(conn: &Connection, conversation: &ConversationDt
     Ok(())
 }
 
-fn extract_search_text(message: &MessageDto) -> String {
+fn extract_message_search_text(message: &MessageDto) -> String {
     message
         .parts
         .iter()
@@ -733,6 +794,16 @@ fn extract_search_text(message: &MessageDto) -> String {
         .chars()
         .take(10_000)
         .collect()
+}
+
+fn build_search_text(title: &str, message: &MessageDto) -> String {
+    let message_text = extract_message_search_text(message);
+    match (title.trim().is_empty(), message_text.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => title.trim().to_string(),
+        (true, false) => message_text,
+        (false, false) => format!("{}\n{}", title.trim(), message_text),
+    }
 }
 
 fn sanitize_display_name(file_name: &str) -> String {
@@ -790,6 +861,91 @@ fn search_messages_like(
     })?
     .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn search_conversation_titles(
+    conn: &Connection,
+    account_id: &str,
+    assistant_id: &str,
+    query: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<ConversationSearchResultDto>> {
+    let keyword = format!("%{query}%");
+    let mut stmt = conn.prepare(
+        "SELECT id, title, update_at, is_pinned
+         FROM conversationentity
+         WHERE account_id = ?1 AND assistant_id = ?2 AND title LIKE ?3
+         ORDER BY is_pinned DESC, update_at DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(params![account_id, assistant_id, keyword, limit], |row| {
+        let title: String = row.get(1)?;
+        Ok(ConversationSearchResultDto {
+            conversation_id: row.get(0)?,
+            snippet: title.clone(),
+            title,
+            update_at: row.get(2)?,
+            is_pinned: row.get::<_, i64>(3)? != 0,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+}
+
+fn search_conversation_content(
+    conn: &Connection,
+    account_id: &str,
+    assistant_id: &str,
+    query: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<ConversationSearchResultDto>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.conversation_id, c.title, c.update_at, c.is_pinned,
+                snippet(message_fts, 0, '', '', '...', 12)
+         FROM message_fts f
+         JOIN conversationentity c ON c.id = f.conversation_id
+         WHERE message_fts MATCH ?1 AND c.account_id = ?2 AND c.assistant_id = ?3
+         ORDER BY c.is_pinned DESC, c.update_at DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(params![query, account_id, assistant_id, limit], |row| {
+        Ok(ConversationSearchResultDto {
+            conversation_id: row.get(0)?,
+            title: row.get(1)?,
+            update_at: row.get(2)?,
+            is_pinned: row.get::<_, i64>(3)? != 0,
+            snippet: row.get(4)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+}
+
+fn search_conversation_content_like(
+    conn: &Connection,
+    account_id: &str,
+    assistant_id: &str,
+    query: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<ConversationSearchResultDto>> {
+    let keyword = format!("%{query}%");
+    let mut stmt = conn.prepare(
+        "SELECT n.messages, n.conversation_id, c.title, c.update_at, c.is_pinned
+         FROM message_node n
+         JOIN conversationentity c ON c.id = n.conversation_id
+         WHERE c.account_id = ?1 AND c.assistant_id = ?2 AND n.messages LIKE ?3
+         ORDER BY c.is_pinned DESC, c.update_at DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(params![account_id, assistant_id, keyword, limit], |row| {
+        let messages_raw: String = row.get(0)?;
+        Ok(ConversationSearchResultDto {
+            conversation_id: row.get(1)?,
+            title: row.get(2)?,
+            update_at: row.get(3)?,
+            is_pinned: row.get::<_, i64>(4)? != 0,
+            snippet: make_snippet(&messages_raw, query),
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
 }
 
 fn make_snippet(raw: &str, query: &str) -> String {

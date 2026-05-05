@@ -63,7 +63,7 @@
   "conversation_search": {
     "search_conversations": "Search conversations",
     "search_failed": "Failed to search conversations",
-    "input_placeholder": "Enter keywords from conversation titles",
+    "input_placeholder": "Enter keywords from conversation titles or content",
     "searching": "Searching...",
     "type_to_start": "Type keywords to start searching",
     "no_results": "No matching conversations found",

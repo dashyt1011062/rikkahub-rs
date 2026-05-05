@@ -127,14 +127,22 @@ pub async fn search(
     Extension(account): Extension<AccountId>,
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
-) -> AppResult<Json<Vec<db::MessageSearchResultDto>>> {
+) -> AppResult<Json<Vec<db::ConversationSearchResultDto>>> {
     let text = query.query.unwrap_or_default();
     if text.trim().is_empty() {
         return Ok(Json(Vec::new()));
     }
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let assistant_id = settings_store::current_assistant_id(&state.config, &account.0).await;
     Ok(Json(
-        db::search_messages(state.config.db_path.clone(), account.0, text, limit).await?,
+        db::search_conversations(
+            state.config.db_path.clone(),
+            account.0,
+            assistant_id,
+            text,
+            limit,
+        )
+        .await?,
     ))
 }
 

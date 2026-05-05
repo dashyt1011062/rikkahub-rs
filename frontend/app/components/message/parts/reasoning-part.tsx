@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, Brain } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import Markdown from "~/components/markdown/markdown";
 import Think from "~/assets/think.svg?react";
 
@@ -21,7 +21,8 @@ export function ReasoningPart({ reasoning, isFinished = true }: ReasoningPartPro
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        <Think className="h-4 w-4" />?<span>{isFinished ? "Thinking" : "Thinking..."}</span>
+        <Think className="h-4 w-4" />
+        <span>{isFinished ? "深度思考" : "深度思考中..."}</span>
       </button>
       {expanded && (
         <div className="border-t border-muted px-3 py-2 text-sm text-muted-foreground">

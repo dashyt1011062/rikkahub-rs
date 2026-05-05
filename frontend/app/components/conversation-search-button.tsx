@@ -14,7 +14,7 @@ import {
 import { Input } from "~/components/ui/input";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import api from "~/services/api";
-import type { ConversationListDto, PagedResult } from "~/types";
+import type { ConversationSearchResultDto } from "~/types";
 
 const SEARCH_PAGE_SIZE = 50;
 
@@ -28,7 +28,7 @@ export function ConversationSearchButton({ onSelect }: ConversationSearchButtonP
   const [query, setQuery] = React.useState("");
   const [searching, setSearching] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [results, setResults] = React.useState<ConversationListDto[]>([]);
+  const [results, setResults] = React.useState<ConversationSearchResultDto[]>([]);
   const requestIdRef = React.useRef(0);
 
   React.useEffect(() => {
@@ -54,16 +54,15 @@ export function ConversationSearchButton({ onSelect }: ConversationSearchButtonP
       setError(null);
 
       api
-        .get<PagedResult<ConversationListDto>>("conversations/paged", {
+        .get<ConversationSearchResultDto[]>("conversations/search", {
           searchParams: {
-            offset: 0,
             limit: SEARCH_PAGE_SIZE,
             query: keyword,
           },
         })
         .then((data) => {
           if (requestId !== requestIdRef.current) return;
-          setResults(data.items);
+          setResults(data);
         })
         .catch((searchError) => {
           if (requestId !== requestIdRef.current) return;
@@ -135,17 +134,24 @@ export function ConversationSearchButton({ onSelect }: ConversationSearchButtonP
                 !error &&
                 results.map((item) => (
                   <button
-                    key={item.id}
+                    key={item.conversationId}
                     type="button"
-                    className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted"
+                    className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted"
                     onClick={() => {
-                      onSelect(item.id);
+                      onSelect(item.conversationId);
                       setOpen(false);
                     }}
                   >
-                    <span className="min-w-0 flex-1 truncate">
-                      {item.title || t("conversation_search.unnamed_conversation")}
-                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate">
+                        {item.title || t("conversation_search.unnamed_conversation")}
+                      </div>
+                      {item.snippet && item.snippet !== item.title ? (
+                        <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                          {item.snippet}
+                        </div>
+                      ) : null}
+                    </div>
                     {item.isPinned ? <Pin className="size-3 text-primary" /> : null}
                   </button>
                 ))}

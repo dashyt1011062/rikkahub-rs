@@ -36,6 +36,14 @@ export interface ConversationListInvalidateEventDto {
   timestamp: number;
 }
 
+export interface ConversationSearchResultDto {
+  conversationId: string;
+  title: string;
+  updateAt: number;
+  isPinned: boolean;
+  snippet: string;
+}
+
 /**
  * Message DTO (for API response)
  * @see app/src/main/java/me/rerere/rikkahub/web/dto/WebDto.kt - MessageDto
@@ -107,5 +115,4 @@ export interface FetchProviderModelsResponseDto {
   providerId: string;
   models: ProviderModelFetchDto[];
 }
-
 
