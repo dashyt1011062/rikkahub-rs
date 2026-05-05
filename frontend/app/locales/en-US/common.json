@@ -75,7 +75,10 @@
     "role_message": "message",
     "jump_to_message": "Jump to message {{index}} ({{role}})",
     "message_title": "Message {{index}} ({{role}})",
-    "no_preview": "No preview available"
+    "no_preview": "No preview available",
+    "previous_user_message": "Previous user message",
+    "next_user_message": "Next user message",
+    "scroll_to_bottom": "Scroll to bottom"
   },
   "workbench": {
     "preview": "Preview",

@@ -75,7 +75,10 @@
     "role_message": "消息",
     "jump_to_message": "跳转到第 {{index}} 条{{role}}消息",
     "message_title": "第 {{index}} 条{{role}}消息",
-    "no_preview": "无可预览内容"
+    "no_preview": "无可预览内容",
+    "previous_user_message": "上一条用户消息",
+    "next_user_message": "下一条用户消息",
+    "scroll_to_bottom": "滑到底部"
   },
   "workbench": {
     "preview": "预览",

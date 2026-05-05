@@ -3,6 +3,7 @@ import * as React from "react";
 import { useNavigate, useParams } from "react-router";
 
 import {
+  ConversationScrollControls,
   ConversationQuickJump,
   getConversationMessageAnchorId,
 } from "~/components/conversation-quick-jump";
@@ -12,7 +13,6 @@ import {
   Conversation,
   ConversationContent,
   ConversationEmptyState,
-  ConversationScrollButton,
 } from "~/components/extended/conversation";
 import { ChatInput } from "~/components/input/chat-input";
 import { ChatMessage } from "~/components/message/chat-message";
@@ -598,6 +598,15 @@ const ConversationTimeline = React.memo(({
   const { t } = useTranslation("page");
   const canQuickJump =
     Boolean(activeId) && !detailLoading && !detailError && selectedNodeMessages.length > 1;
+  const quickJumpItems = React.useMemo(
+    () =>
+      selectedNodeMessages.map(({ message }) => ({
+        id: message.id,
+        role: message.role,
+        preview: getQuickJumpPreview(message, t),
+      })),
+    [selectedNodeMessages, t],
+  );
   const assistant = React.useMemo(() => {
     if (!settings || !conversationAssistantId) return null;
     return settings.assistants.find((item) => item.id === conversationAssistantId) ?? null;
@@ -620,7 +629,7 @@ const ConversationTimeline = React.memo(({
   return (
     <Conversation className="flex-1 min-h-0">
       <ConversationContent
-        className={cn("mx-auto w-full max-w-3xl gap-4 px-4 py-6", contentClassName)}
+        className={cn("w-full gap-4 px-4 py-6", canQuickJump && "lg:pr-16", contentClassName)}
       >
         {!activeId && !isHomeRoute && (
           <ConversationEmptyState
@@ -686,16 +695,10 @@ const ConversationTimeline = React.memo(({
       </ConversationContent>
 
       {canQuickJump ? (
-        <ConversationQuickJump
-          items={selectedNodeMessages.map(({ message }) => ({
-            id: message.id,
-            role: message.role,
-            preview: getQuickJumpPreview(message, t),
-          }))}
-        />
+        <ConversationQuickJump items={quickJumpItems} />
       ) : null}
 
-      <ConversationScrollButton />
+      <ConversationScrollControls items={quickJumpItems} />
     </Conversation>
   );
 });
@@ -1280,4 +1283,3 @@ function ConversationsPageInner() {
     </SidebarProvider>
   );
 }
-

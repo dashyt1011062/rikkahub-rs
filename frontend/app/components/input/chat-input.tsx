@@ -218,8 +218,7 @@ export function ChatInput({
   const canStop = ready && Boolean(onStop) && isGenerating && !disabled;
   const canSend = ready && !isGenerating && !disabled && !isEmpty;
   const canUpload = ready && !disabled && !isGenerating && !uploading && !submitting;
-  const canSwitchModel = ready && !disabled && !isGenerating && !uploading && !submitting;
-  const canUseQuickMessage = ready && !disabled && !uploading && !submitting;
+  const canUseToolbarControls = ready && !disabled;
   const actionDisabled = submitting || uploading || (!canStop && !canSend);
 
   React.useEffect(() => {
@@ -300,7 +299,7 @@ export function ChatInput({
 
   const handleQuickMessageSelect = React.useCallback(
     (content: string) => {
-      if (!canUseQuickMessage || !content) {
+      if (!canUseToolbarControls || !content) {
         return;
       }
 
@@ -311,12 +310,12 @@ export function ChatInput({
       }
       textareaRef.current?.focus();
     },
-    [canUseQuickMessage, error, onValueChange, value],
+    [canUseToolbarControls, error, onValueChange, value],
   );
 
   const handleSuggestionSelect = React.useCallback(
     (suggestion: string) => {
-      if (!canUseQuickMessage || !suggestion) {
+      if (!canUseToolbarControls || !suggestion) {
         return;
       }
 
@@ -326,7 +325,7 @@ export function ChatInput({
       }
       textareaRef.current?.focus();
     },
-    [canUseQuickMessage, error, onSuggestionClick],
+    [canUseToolbarControls, error, onSuggestionClick],
   );
 
   const handleKeyDown = React.useCallback(
@@ -432,7 +431,7 @@ export function ChatInput({
         className,
       )}
     >
-      <div className="mx-auto w-full max-w-3xl px-4 py-4">
+      <div className="w-full px-4 py-4">
         <div
           className={cn(
             "relative flex flex-col gap-2 rounded-lg border bg-muted/50 p-2 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-1 focus-within:ring-ring",
@@ -472,7 +471,7 @@ export function ChatInput({
                 <button
                   key={`${suggestion}-${index}`}
                   type="button"
-                  disabled={!canUseQuickMessage}
+                  disabled={!canUseToolbarControls}
                   className={cn(
                     "shrink-0 rounded-lg border bg-background px-3 py-1 text-xs text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50",
                   )}
@@ -597,14 +596,14 @@ export function ChatInput({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <ModelList disabled={!canSwitchModel} className="max-w-64" />
-              <SearchPickerButton disabled={!canSwitchModel} />
-              <ReasoningPickerButton disabled={!canSwitchModel} />
-              <McpPickerButton disabled={!canSwitchModel} />
-              <InjectionPickerButton disabled={!canSwitchModel} />
+              <ModelList disabled={!canUseToolbarControls} className="max-w-64" />
+              <SearchPickerButton disabled={!canUseToolbarControls} />
+              <ReasoningPickerButton disabled={!canUseToolbarControls} />
+              <McpPickerButton disabled={!canUseToolbarControls} />
+              <InjectionPickerButton disabled={!canUseToolbarControls} />
               <QuickMessageButton
                 quickMessages={quickMessages}
-                disabled={!canUseQuickMessage}
+                disabled={!canUseToolbarControls}
                 onSelect={handleQuickMessageSelect}
               />
             </div>
@@ -695,4 +694,3 @@ function QuickMessageButton({
     </DropdownMenu>
   );
 }
-
