@@ -23,8 +23,7 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from "~/components/ui/s
 import { useIsMobile } from "~/hooks/use-mobile";
 import { toConversationSummaryUpdate, useConversationList } from "~/hooks/use-conversation-list";
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
-import { useCurrentModel } from "~/hooks/use-current-model";
-import { getAssistantDisplayName, getModelDisplayName } from "~/lib/display";
+import { getAssistantDisplayName } from "~/lib/display";
 import { cn } from "~/lib/utils";
 import api, { sse } from "~/services/api";
 import { useChatInputStore } from "~/stores";
@@ -733,7 +732,6 @@ function ConversationsPageInner() {
   const { panel, closePanel } = useWorkbench();
 
   const { settings, assistants, currentAssistantId, currentAssistant } = useCurrentAssistant();
-  const { currentModel, currentProvider } = useCurrentModel();
   const {
     conversations,
     activeId,
@@ -1217,23 +1215,8 @@ function ConversationsPageInner() {
         onCreateConversation={handleCreateConversation}
         webAuthEnabled={settings?.webServerJwtEnabled === true}
       />
-      <SidebarInset className="flex min-h-svh flex-col overflow-hidden">
-        <div className="flex items-center gap-2 border-b px-4 py-3">
-          <SidebarTrigger />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm text-muted-foreground">
-              {activeConversation
-                ? activeConversation.title
-                : t("conversations.header.select_conversation")}
-            </div>
-            {currentModel && currentProvider ? (
-              <div className="truncate text-xs text-muted-foreground/80">
-                {`${getAssistantDisplayName(currentAssistant?.name)} / ${getModelDisplayName(currentModel.displayName, currentModel.modelId)} (${currentProvider.name})`}
-              </div>
-            ) : null}
-          </div>
-        </div>
-
+      <SidebarInset className="relative flex min-h-svh flex-col overflow-hidden">
+        <SidebarTrigger className="absolute top-3 left-3 z-30 size-8 rounded-full border bg-background/85 shadow-sm backdrop-blur hover:bg-background" />
         {!isMobile ? (
           <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
             <ResizablePanel
