@@ -16,7 +16,6 @@ import {
 } from "~/components/extended/conversation";
 import { ChatInput, type ChatInputSendOptions } from "~/components/input/chat-input";
 import { ChatMessage } from "~/components/message/chat-message";
-import { ViewportVirtualItem } from "~/components/message/viewport-virtual-item";
 import { Drawer, DrawerContent } from "~/components/ui/drawer";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "~/components/ui/resizable";
 import { TypingIndicator } from "~/components/ui/typing-indicator";
@@ -556,33 +555,6 @@ function groupTimelineMessages(selectedNodeMessages: SelectedNodeMessage[]): Tim
   return grouped;
 }
 
-function estimatePartHeight(part: UIMessagePart): number {
-  switch (part.type) {
-    case "text": {
-      const lineEstimate = Math.ceil(part.text.length / 40);
-      return Math.min(520, Math.max(56, lineEstimate * 24));
-    }
-    case "image":
-      return 280;
-    case "video":
-      return 220;
-    case "audio":
-      return 88;
-    case "document":
-      return 72;
-    case "reasoning":
-      return 104;
-    case "tool":
-      return 132;
-  }
-}
-
-function estimateMessageHeight(message: MessageDto): number {
-  const baseHeight = message.role.toUpperCase() === "USER" ? 88 : 112;
-  const partsHeight = message.parts.reduce((total, part) => total + estimatePartHeight(part), 0);
-  return Math.min(2400, Math.max(96, baseHeight + partsHeight));
-}
-
 function applyNodeUpdate(
   conversation: ConversationDto,
   event: ConversationNodeUpdateEventDto,
@@ -1033,7 +1005,6 @@ const ConversationTimeline = React.memo(({
     () => groupTimelineMessages(selectedNodeMessages),
     [selectedNodeMessages],
   );
-  const [measuredHeights, setMeasuredHeights] = React.useState<Record<string, number>>({});
   const canQuickJump =
     Boolean(activeId) && !detailLoading && !detailError && timelineItems.length > 1;
   const quickJumpItems = React.useMemo(
@@ -1063,17 +1034,6 @@ const ConversationTimeline = React.memo(({
 
     return map;
   }, [settings]);
-  const handleItemHeightChange = React.useCallback((id: string, height: number) => {
-    setMeasuredHeights((current) => {
-      if (current[id] != null && Math.abs(current[id] - height) < 2) {
-        return current;
-      }
-      return {
-        ...current,
-        [id]: height,
-      };
-    });
-  }, []);
 
   return (
     <Conversation className="flex-1 min-h-0">
@@ -1112,19 +1072,10 @@ const ConversationTimeline = React.memo(({
           timelineItems.map((item, index) => {
             const { node, message } = item;
             const model = message.modelId ? (modelById.get(message.modelId) ?? null) : null;
-            const estimatedHeight = measuredHeights[item.id] ?? estimateMessageHeight(message);
-            const shouldKeepMounted =
-              index >= Math.max(0, timelineItems.length - 8) ||
-              (isGenerating && index >= Math.max(0, timelineItems.length - 2));
 
             return (
-              <ViewportVirtualItem
+              <div
                 key={item.id}
-                estimatedHeight={estimatedHeight}
-                alwaysMounted={shouldKeepMounted}
-                onHeightChange={(height) => {
-                  handleItemHeightChange(item.id, height);
-                }}
                 id={getConversationMessageAnchorId(item.id)}
                 className="scroll-mt-24"
               >
@@ -1149,7 +1100,7 @@ const ConversationTimeline = React.memo(({
                   onSelectBranch={onSelectBranch}
                   onToolApproval={onToolApproval}
                 />
-              </ViewportVirtualItem>
+              </div>
             );
           })}
         {!detailLoading && !detailError && activeId && isGenerating && (
