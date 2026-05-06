@@ -266,7 +266,6 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
           className={`cursor-zoom-in rounded-md border border-muted object-contain ${loaded ? "block" : "hidden"}`}
           loading="lazy"
           decoding="async"
-          fetchPriority="low"
           onClick={openPreview}
           onLoad={() => setLoaded(true)}
           onError={() => setError(true)}
