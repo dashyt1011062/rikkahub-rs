@@ -229,6 +229,129 @@ function getQuotedMessageRoleLabel(
   }
 }
 
+function useHorizontalDragScroll() {
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const suppressClickTimeoutRef = React.useRef<number | null>(null);
+  const dragStateRef = React.useRef({
+    pointerId: -1,
+    startX: 0,
+    startScrollLeft: 0,
+    moved: false,
+    suppressClick: false,
+  });
+
+  const clearSuppressClickTimeout = React.useCallback(() => {
+    if (suppressClickTimeoutRef.current == null) {
+      return;
+    }
+
+    window.clearTimeout(suppressClickTimeoutRef.current);
+    suppressClickTimeoutRef.current = null;
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      clearSuppressClickTimeout();
+    },
+    [clearSuppressClickTimeout],
+  );
+
+  const endDrag = React.useCallback(
+    (pointerId?: number) => {
+      const container = containerRef.current;
+      if (container && pointerId != null && container.hasPointerCapture(pointerId)) {
+        container.releasePointerCapture(pointerId);
+      }
+
+      const moved = dragStateRef.current.moved;
+      dragStateRef.current.pointerId = -1;
+      dragStateRef.current.startX = 0;
+      dragStateRef.current.startScrollLeft = 0;
+      dragStateRef.current.moved = false;
+      dragStateRef.current.suppressClick = moved;
+
+      clearSuppressClickTimeout();
+      if (!moved || typeof window === "undefined") {
+        return;
+      }
+
+      suppressClickTimeoutRef.current = window.setTimeout(() => {
+        dragStateRef.current.suppressClick = false;
+        suppressClickTimeoutRef.current = null;
+      }, 0);
+    },
+    [clearSuppressClickTimeout],
+  );
+
+  const handlePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    const container = containerRef.current;
+    if (!container || container.scrollWidth <= container.clientWidth) {
+      return;
+    }
+
+    clearSuppressClickTimeout();
+    dragStateRef.current.pointerId = event.pointerId;
+    dragStateRef.current.startX = event.clientX;
+    dragStateRef.current.startScrollLeft = container.scrollLeft;
+    dragStateRef.current.moved = false;
+    dragStateRef.current.suppressClick = false;
+    container.setPointerCapture(event.pointerId);
+  }, [clearSuppressClickTimeout]);
+
+  const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const container = containerRef.current;
+    if (!container || dragStateRef.current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - dragStateRef.current.startX;
+    if (!dragStateRef.current.moved && Math.abs(deltaX) < 4) {
+      return;
+    }
+
+    dragStateRef.current.moved = true;
+    container.scrollLeft = dragStateRef.current.startScrollLeft - deltaX;
+  }, []);
+
+  const handlePointerUp = React.useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      endDrag(event.pointerId);
+    },
+    [endDrag],
+  );
+
+  const handlePointerCancel = React.useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      endDrag(event.pointerId);
+    },
+    [endDrag],
+  );
+
+  const handleClickCapture = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragStateRef.current.suppressClick) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    dragStateRef.current.suppressClick = false;
+    clearSuppressClickTimeout();
+  }, [clearSuppressClickTimeout]);
+
+  return {
+    containerRef,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handlePointerCancel,
+    handleClickCapture,
+  };
+}
+
 export function ChatInput({
   value,
   attachments,
@@ -299,6 +422,14 @@ export function ChatInput({
   const canUpload = ready && !disabled && !isGenerating && !uploading;
   const canUseToolbarControls = ready && !disabled;
   const actionDisabled = submitting || uploading || (!canStop && !canSend);
+  const {
+    containerRef: toolbarScrollRef,
+    handlePointerDown: handleToolbarPointerDown,
+    handlePointerMove: handleToolbarPointerMove,
+    handlePointerUp: handleToolbarPointerUp,
+    handlePointerCancel: handleToolbarPointerCancel,
+    handleClickCapture: handleToolbarClickCapture,
+  } = useHorizontalDragScroll();
 
   React.useEffect(() => {
     if (!canUpload) {
@@ -662,7 +793,15 @@ export function ChatInput({
             rows={2}
           />
           <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-1">
+            <div
+              ref={toolbarScrollRef}
+              className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overscroll-x-contain pb-0.5 pr-1 touch-pan-x [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0"
+              onPointerDown={handleToolbarPointerDown}
+              onPointerMove={handleToolbarPointerMove}
+              onPointerUp={handleToolbarPointerUp}
+              onPointerCancel={handleToolbarPointerCancel}
+              onClickCapture={handleToolbarClickCapture}
+            >
               <DropdownMenu open={uploadMenuOpen} onOpenChange={setUploadMenuOpen}>
                 <input
                   ref={fileInputRef}
@@ -711,7 +850,7 @@ export function ChatInput({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <ModelList disabled={!canUseToolbarControls} className="max-w-64" />
+              <ModelList disabled={!canUseToolbarControls} className="max-w-64 shrink-0" />
               <SearchPickerButton disabled={!canUseToolbarControls} />
               <ReasoningPickerButton disabled={!canUseToolbarControls} />
               <McpPickerButton disabled={!canUseToolbarControls} />
@@ -726,7 +865,7 @@ export function ChatInput({
                   }}
                   variant="outline"
                   size="sm"
-                  className="h-8 rounded-full border bg-background/70 px-0.5"
+                  className="h-8 shrink-0 rounded-full border bg-background/70 px-0.5"
                 >
                   <ToggleGroupItem
                     value="new_image"
