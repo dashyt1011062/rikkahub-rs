@@ -264,6 +264,9 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
           src={imageUrl}
           alt="Message attachment"
           className={`cursor-zoom-in rounded-md border border-muted object-contain ${loaded ? "block" : "hidden"}`}
+          loading="lazy"
+          decoding="async"
+          fetchPriority="low"
           onClick={openPreview}
           onLoad={() => setLoaded(true)}
           onError={() => setError(true)}
@@ -320,6 +323,7 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
                 src={imageUrl}
                 alt="Preview"
                 className="max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] object-contain"
+                decoding="async"
                 draggable={false}
                 style={{
                   transform: `scale(${scale})`,
