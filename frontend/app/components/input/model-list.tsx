@@ -9,6 +9,7 @@ import { useIsMobile } from "~/hooks/use-mobile";
 import { getModelDisplayName } from "~/lib/display";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
+import { useSettingsStore } from "~/stores";
 import type { ModelAbility, ProviderModel } from "~/types";
 import { AIIcon } from "~/components/ui/ai-icon";
 import { Badge } from "~/components/ui/badge";
@@ -171,6 +172,7 @@ function ModelOptionRow({
 export function ModelList({ disabled = false, className, onChanged }: ModelListProps) {
   const { t } = useTranslation("input");
   const { settings, currentAssistant } = useCurrentAssistant();
+  const setSettings = useSettingsStore((state) => state.setSettings);
   const isMobile = useIsMobile();
 
   const [open, setOpen] = React.useState(false);
@@ -310,6 +312,16 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
           assistantId: currentAssistant.id,
           modelId: model.id,
         });
+        if (settings) {
+          setSettings({
+            ...settings,
+            assistants: settings.assistants.map((assistant) =>
+              assistant.id === currentAssistant.id
+                ? { ...assistant, chatModelId: model.id }
+                : assistant,
+            ),
+          });
+        }
         onChanged?.(model);
         setOpen(false);
       } catch (changeError) {
@@ -322,7 +334,7 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
         setUpdatingModelId(null);
       }
     },
-    [currentAssistant, currentModelId, disabled, onChanged, t],
+    [currentAssistant, currentModelId, disabled, onChanged, setSettings, settings, t],
   );
 
   const handleToggleFavorite = React.useCallback(
