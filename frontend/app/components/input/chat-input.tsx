@@ -15,8 +15,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { useCurrentAssistant } from "~/hooks/use-current-assistant";
-import { useCurrentModel } from "~/hooks/use-current-model";
+import { useCurrentAssistantProfile } from "~/hooks/use-current-assistant";
+import { useCurrentModelSelection } from "~/hooks/use-current-model";
 import { ModelList } from "~/components/input/model-list";
 import { ReasoningPickerButton } from "~/components/input/reasoning-picker";
 import { SearchPickerButton } from "~/components/input/search-picker";
@@ -376,8 +376,8 @@ export function ChatInput({
   const sendOnEnter = useSettingsStore(
     (state) => state.settings?.displaySetting.sendOnEnter ?? true,
   );
-  const { currentAssistant } = useCurrentAssistant();
-  const { currentModel } = useCurrentModel();
+  const currentAssistant = useCurrentAssistantProfile();
+  const { currentModel } = useCurrentModelSelection();
 
   const quickMessages = React.useMemo(() => {
     const source = currentAssistant?.quickMessages;

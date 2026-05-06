@@ -48,7 +48,6 @@ import {
   type UIMessagePart,
 } from "~/types";
 import { MessageSquare } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -84,6 +83,11 @@ interface TimelineMessageItem {
   forkMessageId?: string;
   disableEdit?: boolean;
   disableBranchSwitch?: boolean;
+}
+
+interface TimelineMessageCacheEntry {
+  item: TimelineMessageItem;
+  source: SelectedNodeMessage[];
 }
 
 type ConversationSummaryUpdater = (update: ReturnType<typeof toConversationSummaryUpdate>) => void;
@@ -531,6 +535,16 @@ function buildGroupedTimelineItem(group: SelectedNodeMessage[]): TimelineMessage
   };
 }
 
+function sameSelectedNodeMessageGroup(
+  previous: SelectedNodeMessage[],
+  next: SelectedNodeMessage[],
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((item, index) => item === next[index])
+  );
+}
+
 function groupTimelineMessages(selectedNodeMessages: SelectedNodeMessage[]): TimelineMessageItem[] {
   const grouped: TimelineMessageItem[] = [];
   let assistantGroup: SelectedNodeMessage[] = [];
@@ -553,6 +567,71 @@ function groupTimelineMessages(selectedNodeMessages: SelectedNodeMessage[]): Tim
 
   flushAssistantGroup();
   return grouped;
+}
+
+function deriveTimelineMessageCache(
+  selectedNodeMessages: SelectedNodeMessage[],
+  previous: TimelineMessageCacheEntry[],
+): TimelineMessageCacheEntry[] {
+  const next: TimelineMessageCacheEntry[] = [];
+  let assistantGroup: SelectedNodeMessage[] = [];
+
+  const flushAssistantGroup = () => {
+    if (assistantGroup.length === 0) return;
+    const previousEntry = previous[next.length];
+    if (previousEntry && sameSelectedNodeMessageGroup(previousEntry.source, assistantGroup)) {
+      next.push(previousEntry);
+    } else {
+      next.push({
+        item: buildGroupedTimelineItem(assistantGroup),
+        source: assistantGroup,
+      });
+    }
+    assistantGroup = [];
+  };
+
+  selectedNodeMessages.forEach((item) => {
+    if (item.message.role.toUpperCase() === "ASSISTANT") {
+      assistantGroup.push(item);
+      return;
+    }
+
+    flushAssistantGroup();
+    const previousEntry = previous[next.length];
+    const nextSource = [item];
+    if (previousEntry && sameSelectedNodeMessageGroup(previousEntry.source, nextSource)) {
+      next.push(previousEntry);
+    } else {
+      next.push({
+        item: buildGroupedTimelineItem(nextSource),
+        source: nextSource,
+      });
+    }
+  });
+
+  flushAssistantGroup();
+  return next;
+}
+
+function deriveSelectedNodeMessages(
+  nodes: MessageNodeDto[],
+  previous: SelectedNodeMessage[],
+): SelectedNodeMessage[] {
+  let changed = previous.length !== nodes.length;
+  const next = nodes.map((node, index) => {
+    const message = node.messages[node.selectIndex] ?? node.messages[0];
+    const previousItem = previous[index];
+    if (previousItem && previousItem.node === node && previousItem.message === message) {
+      return previousItem;
+    }
+    changed = true;
+    return {
+      node,
+      message,
+    };
+  });
+
+  return changed ? next : previous;
 }
 
 function applyNodeUpdate(
@@ -594,6 +673,7 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
   const [detailError, setDetailError] = React.useState<string | null>(null);
   const activeIdRef = React.useRef(activeId);
   const detailRef = React.useRef<ConversationDto | null>(null);
+  const selectedNodeMessagesRef = React.useRef<SelectedNodeMessage[]>([]);
   const mountedRef = React.useRef(true);
   const requestVersionRef = React.useRef(0);
   const scheduledRefreshRef = React.useRef<number | null>(null);
@@ -824,12 +904,15 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
   }, [detail?.id, detail?.isGenerating, refreshDetail]);
 
   const selectedNodeMessages = React.useMemo<SelectedNodeMessage[]>(() => {
-    if (!detail) return [];
-    return detail.messages.map((node) => ({
-      node,
-      message: node.messages[node.selectIndex] ?? node.messages[0],
-    }));
-  }, [detail]);
+    if (!detail) {
+      selectedNodeMessagesRef.current = [];
+      return [];
+    }
+
+    const next = deriveSelectedNodeMessages(detail.messages, selectedNodeMessagesRef.current);
+    selectedNodeMessagesRef.current = next;
+    return next;
+  }, [detail?.messages]);
 
   return {
     detail,
@@ -1001,10 +1084,12 @@ const ConversationTimeline = React.memo(({
   onToolApproval: (toolCallId: string, approved: boolean, reason: string) => Promise<void>;
 }) => {
   const { t } = useTranslation("page");
-  const timelineItems = React.useMemo(
-    () => groupTimelineMessages(selectedNodeMessages),
-    [selectedNodeMessages],
-  );
+  const timelineCacheRef = React.useRef<TimelineMessageCacheEntry[]>([]);
+  const timelineItems = React.useMemo(() => {
+    const next = deriveTimelineMessageCache(selectedNodeMessages, timelineCacheRef.current);
+    timelineCacheRef.current = next;
+    return next.map((entry) => entry.item);
+  }, [selectedNodeMessages]);
   const canQuickJump =
     Boolean(activeId) && !detailLoading && !detailError && timelineItems.length > 1;
   const quickJumpItems = React.useMemo(
@@ -1630,21 +1715,12 @@ function ConversationsPageInner() {
         </div>
       )}
 
-      <motion.div layout="position" transition={{ type: "spring", bounce: 0.15, duration: 0.5 }}>
-        <AnimatePresence>
-          {isNewChat && (
-            <motion.div
-              key="welcome"
-              className="mb-4 text-center"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.2 }}
-            >
-              <p className="text-lg text-muted-foreground">{t("conversations.welcome_prompt")}</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+      <div>
+        {isNewChat ? (
+          <div className="mb-4 text-center">
+            <p className="text-lg text-muted-foreground">{t("conversations.welcome_prompt")}</p>
+          </div>
+        ) : null}
         <ChatInput
           value={inputText}
           attachments={inputAttachments}
@@ -1668,7 +1744,7 @@ function ConversationsPageInner() {
           onSend={handleSend}
           onStop={activeId ? handleStop : undefined}
         />
-      </motion.div>
+      </div>
     </div>
   );
 

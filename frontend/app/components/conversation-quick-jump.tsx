@@ -25,6 +25,10 @@ interface ConversationScrollControlsProps {
   items: ConversationQuickJumpItem[];
 }
 
+interface ConversationAnchorOffset extends ConversationQuickJumpItem {
+  top: number;
+}
+
 function getRoleLineClass(role: string): string {
   const normalizedRole = role.toUpperCase();
   if (normalizedRole === "USER") {
@@ -76,17 +80,76 @@ function getAnchorOffset(scrollElement: HTMLElement, messageId: string): number 
   return anchor.getBoundingClientRect().top - containerRect.top + scrollElement.scrollTop;
 }
 
-function resolveScrollTargets(items: ConversationQuickJumpItem[], scrollElement: HTMLElement) {
-  const viewportTop = scrollElement.scrollTop + SCROLL_ANCHOR_OFFSET;
-  const userAnchors = items
-    .filter(isUserMessage)
-    .map((item) => ({ id: item.id, top: getAnchorOffset(scrollElement, item.id) }))
-    .filter((item): item is { id: string; top: number } => item.top !== null);
+function buildAnchorOffsets(
+  items: ConversationQuickJumpItem[],
+  scrollElement: HTMLElement,
+): ConversationAnchorOffset[] {
+  return items
+    .map((item) => {
+      const top = getAnchorOffset(scrollElement, item.id);
+      if (top === null) return null;
+      return {
+        ...item,
+        top,
+      };
+    })
+    .filter((item): item is ConversationAnchorOffset => item !== null);
+}
 
+function areAnchorOffsetsEqual(
+  previous: ConversationAnchorOffset[],
+  next: ConversationAnchorOffset[],
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every(
+      (item, index) =>
+        item.id === next[index]?.id &&
+        item.role === next[index]?.role &&
+        item.top === next[index]?.top &&
+        item.preview === next[index]?.preview,
+    )
+  );
+}
+
+function resolveActiveMessageIdFromOffsets(
+  items: ConversationQuickJumpItem[],
+  anchorOffsets: ConversationAnchorOffset[],
+  scrollElement: HTMLElement | null,
+): string | null {
+  if (!scrollElement || items.length === 0) {
+    return items[items.length - 1]?.id ?? null;
+  }
+  if (anchorOffsets.length === 0) {
+    return items[items.length - 1]?.id ?? null;
+  }
+
+  const viewportTop = scrollElement.scrollTop + 24;
+  let activeId = anchorOffsets[0]?.id ?? items[items.length - 1]?.id ?? null;
+
+  for (const item of anchorOffsets) {
+    if (item.top <= viewportTop) {
+      activeId = item.id;
+    } else {
+      break;
+    }
+  }
+
+  return activeId;
+}
+
+function resolveScrollTargets(
+  anchorOffsets: ConversationAnchorOffset[],
+  scrollElement: HTMLElement,
+) {
+  const viewportTop = scrollElement.scrollTop + SCROLL_ANCHOR_OFFSET;
   let previousId: string | null = null;
   let nextId: string | null = null;
 
-  for (const item of userAnchors) {
+  for (const item of anchorOffsets) {
+    if (!isUserMessage(item)) {
+      continue;
+    }
     if (item.top < viewportTop - MESSAGE_TOLERANCE) {
       previousId = item.id;
       continue;
@@ -101,9 +164,63 @@ function resolveScrollTargets(items: ConversationQuickJumpItem[], scrollElement:
   return { previousId, nextId };
 }
 
+function useConversationAnchorOffsets(items: ConversationQuickJumpItem[]) {
+  const { scrollRef, contentRef } = useStickToBottomContext();
+  const anchorOffsetsRef = React.useRef<ConversationAnchorOffset[]>([]);
+
+  const rebuildAnchorOffsets = React.useCallback(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) {
+      anchorOffsetsRef.current = [];
+      return anchorOffsetsRef.current;
+    }
+
+    const next = buildAnchorOffsets(items, scrollElement);
+    if (!areAnchorOffsetsEqual(anchorOffsetsRef.current, next)) {
+      anchorOffsetsRef.current = next;
+    }
+    return anchorOffsetsRef.current;
+  }, [items, scrollRef]);
+
+  React.useEffect(() => {
+    const contentElement = contentRef.current;
+    let frameId: number | null = null;
+
+    const scheduleRebuild = () => {
+      if (frameId !== null) return;
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        rebuildAnchorOffsets();
+      });
+    };
+
+    scheduleRebuild();
+
+    const resizeObserver = contentElement ? new ResizeObserver(scheduleRebuild) : null;
+    if (contentElement && resizeObserver) {
+      resizeObserver.observe(contentElement);
+    }
+    window.addEventListener("resize", scheduleRebuild);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", scheduleRebuild);
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, [contentRef, rebuildAnchorOffsets]);
+
+  return {
+    scrollRef,
+    anchorOffsetsRef,
+    rebuildAnchorOffsets,
+  };
+}
+
 export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
   const { t } = useTranslation();
-  const { scrollRef } = useStickToBottomContext();
+  const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = useConversationAnchorOffsets(items);
   const [activeMessageId, setActiveMessageId] = React.useState<string | null>(null);
   const canQuickJump = items.length > 1 && items.length <= 128;
   const activeIndex = React.useMemo(() => {
@@ -114,26 +231,8 @@ export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
 
   const resolveActiveMessageId = React.useCallback(() => {
     const scrollElement = scrollRef.current;
-    if (!scrollElement || items.length === 0) {
-      return items[items.length - 1]?.id ?? null;
-    }
-
-    const scrollTopLine = scrollElement.getBoundingClientRect().top + 24;
-    let activeId = items[0]?.id ?? null;
-
-    for (const item of items) {
-      const anchor = document.getElementById(getConversationMessageAnchorId(item.id));
-      if (!anchor) continue;
-
-      if (anchor.getBoundingClientRect().top <= scrollTopLine) {
-        activeId = item.id;
-      } else {
-        break;
-      }
-    }
-
-    return activeId;
-  }, [items, scrollRef]);
+    return resolveActiveMessageIdFromOffsets(items, anchorOffsetsRef.current, scrollElement);
+  }, [anchorOffsetsRef, items, scrollRef]);
 
   React.useEffect(() => {
     if (!canQuickJump) {
@@ -143,33 +242,35 @@ export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
 
     const scrollElement = scrollRef.current;
     if (!scrollElement) {
+      rebuildAnchorOffsets();
       setActiveMessageId(resolveActiveMessageId());
       return;
     }
 
-    let frameId: number | null = null;
+    let timeoutId: number | null = null;
     const updateActive = () => {
-      frameId = null;
       const nextActiveId = resolveActiveMessageId();
       setActiveMessageId((prev) => (prev === nextActiveId ? prev : nextActiveId));
     };
     const scheduleUpdate = () => {
-      if (frameId !== null) return;
-      frameId = window.requestAnimationFrame(updateActive);
+      if (timeoutId !== null) return;
+      timeoutId = window.setTimeout(() => {
+        timeoutId = null;
+        updateActive();
+      }, 48);
     };
 
+    rebuildAnchorOffsets();
     updateActive();
     scrollElement.addEventListener("scroll", scheduleUpdate, { passive: true });
-    window.addEventListener("resize", scheduleUpdate);
 
     return () => {
       scrollElement.removeEventListener("scroll", scheduleUpdate);
-      window.removeEventListener("resize", scheduleUpdate);
-      if (frameId !== null) {
-        window.cancelAnimationFrame(frameId);
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
       }
     };
-  }, [canQuickJump, resolveActiveMessageId, scrollRef]);
+  }, [canQuickJump, rebuildAnchorOffsets, resolveActiveMessageId, scrollRef]);
 
   const handleQuickJump = React.useCallback((messageId: string) => {
     const anchor = document.getElementById(getConversationMessageAnchorId(messageId));
@@ -242,7 +343,8 @@ export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
 
 export function ConversationScrollControls({ items }: ConversationScrollControlsProps) {
   const { t } = useTranslation();
-  const { isAtBottom, scrollRef, scrollToBottom } = useStickToBottomContext();
+  const { isAtBottom, scrollToBottom } = useStickToBottomContext();
+  const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = useConversationAnchorOffsets(items);
   const [direction, setDirection] = React.useState<"older" | "newer" | null>(null);
   const [targets, setTargets] = React.useState<{ previousId: string | null; nextId: string | null }>({
     previousId: null,
@@ -252,8 +354,10 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
 
   const resolveTargets = React.useCallback(() => {
     const scrollElement = scrollRef.current;
-    return scrollElement ? resolveScrollTargets(items, scrollElement) : { previousId: null, nextId: null };
-  }, [items, scrollRef]);
+    return scrollElement
+      ? resolveScrollTargets(anchorOffsetsRef.current, scrollElement)
+      : { previousId: null, nextId: null };
+  }, [anchorOffsetsRef, scrollRef]);
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -262,12 +366,12 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
       return;
     }
 
-    let frameId: number | null = null;
+    let timeoutId: number | null = null;
     lastScrollTopRef.current = scrollElement.scrollTop;
+    rebuildAnchorOffsets();
     setTargets(resolveTargets());
 
     const update = () => {
-      frameId = null;
       const currentScrollTop = scrollElement.scrollTop;
       const delta = currentScrollTop - lastScrollTopRef.current;
       if (Math.abs(delta) > 2) {
@@ -278,22 +382,22 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
     };
 
     const scheduleUpdate = () => {
-      if (frameId === null) {
-        frameId = window.requestAnimationFrame(update);
-      }
+      if (timeoutId !== null) return;
+      timeoutId = window.setTimeout(() => {
+        timeoutId = null;
+        update();
+      }, 48);
     };
 
     scrollElement.addEventListener("scroll", scheduleUpdate, { passive: true });
-    window.addEventListener("resize", scheduleUpdate);
 
     return () => {
       scrollElement.removeEventListener("scroll", scheduleUpdate);
-      window.removeEventListener("resize", scheduleUpdate);
-      if (frameId !== null) {
-        window.cancelAnimationFrame(frameId);
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
       }
     };
-  }, [resolveTargets, scrollRef]);
+  }, [rebuildAnchorOffsets, resolveTargets, scrollRef]);
 
   const scrollToMessage = React.useCallback((messageId: string, nextDirection: "older" | "newer") => {
     const anchor = document.getElementById(getConversationMessageAnchorId(messageId));
