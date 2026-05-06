@@ -13,6 +13,7 @@ import {
   GitFork,
   Pencil,
   RefreshCw,
+  Reply,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -48,10 +49,16 @@ interface ChatMessageProps {
   isLastMessage?: boolean;
   assistant?: AssistantProfile | null;
   model?: ProviderModel | null;
+  deleteMessageIds?: string[];
+  regenerateMessageId?: string;
+  forkMessageId?: string;
+  disableEdit?: boolean;
+  disableBranchSwitch?: boolean;
   onEdit?: (message: MessageDto) => void | Promise<void>;
   onRegenerate?: (messageId: string) => void | Promise<void>;
   onSelectBranch?: (nodeId: string, selectIndex: number) => void | Promise<void>;
-  onDelete?: (messageId: string) => void | Promise<void>;
+  onDelete?: (messageIds: string | string[]) => void | Promise<void>;
+  onQuote?: (message: MessageDto) => void | Promise<void>;
   onFork?: (messageId: string) => void | Promise<void>;
   onToolApproval?: (toolCallId: string, approved: boolean, reason: string) => void | Promise<void>;
 }
@@ -167,20 +174,32 @@ const ChatMessageActionsRow = React.memo(({
   message,
   loading,
   alignRight,
+  deleteMessageIds,
+  regenerateMessageId,
+  forkMessageId,
+  disableEdit,
+  disableBranchSwitch,
   onEdit,
   onRegenerate,
   onSelectBranch,
   onDelete,
+  onQuote,
   onFork,
 }: {
   node: MessageNodeDto;
   message: MessageDto;
   loading: boolean;
   alignRight: boolean;
+  deleteMessageIds?: string[];
+  regenerateMessageId?: string;
+  forkMessageId?: string;
+  disableEdit?: boolean;
+  disableBranchSwitch?: boolean;
   onEdit?: (message: MessageDto) => void | Promise<void>;
   onRegenerate?: (messageId: string) => void | Promise<void>;
   onSelectBranch?: (nodeId: string, selectIndex: number) => void | Promise<void>;
-  onDelete?: (messageId: string) => void | Promise<void>;
+  onDelete?: (messageIds: string | string[]) => void | Promise<void>;
+  onQuote?: (message: MessageDto) => void | Promise<void>;
   onFork?: (messageId: string) => void | Promise<void>;
 }) => {
   const { t } = useTranslation("message");
@@ -211,11 +230,11 @@ const ChatMessageActionsRow = React.memo(({
 
     setRegenerating(true);
     try {
-      await onRegenerate(message.id);
+      await onRegenerate(regenerateMessageId ?? message.id);
     } finally {
       setRegenerating(false);
     }
-  }, [confirm, message.id, message.role, onRegenerate, t]);
+  }, [confirm, message.id, message.role, onRegenerate, regenerateMessageId, t]);
 
   const handleSwitchBranch = React.useCallback(
     async (selectIndex: number) => {
@@ -247,26 +266,28 @@ const ChatMessageActionsRow = React.memo(({
 
     setDeleting(true);
     try {
-      await onDelete(message.id);
+      await onDelete(deleteMessageIds && deleteMessageIds.length > 0 ? deleteMessageIds : message.id);
     } finally {
       setDeleting(false);
     }
-  }, [confirm, message.id, onDelete, t]);
+  }, [confirm, deleteMessageIds, message.id, onDelete, t]);
 
   const handleFork = React.useCallback(async () => {
     if (!onFork) return;
 
     setForking(true);
     try {
-      await onFork(message.id);
+      await onFork(forkMessageId ?? message.id);
     } finally {
       setForking(false);
     }
-  }, [message.id, onFork]);
+  }, [forkMessageId, message.id, onFork]);
 
-  const canSwitchBranch = Boolean(onSelectBranch) && node.messages.length > 1;
+  const canSwitchBranch =
+    Boolean(onSelectBranch) && node.messages.length > 1 && disableBranchSwitch !== true;
   const canEdit =
     Boolean(onEdit) &&
+    disableEdit !== true &&
     (message.role === "USER" || message.role === "ASSISTANT") &&
     hasEditableContent(message.parts);
   const actionDisabled = loading || switchingBranch || regenerating || deleting || forking;
@@ -305,6 +326,22 @@ const ChatMessageActionsRow = React.memo(({
           variant="ghost"
         >
           <Pencil className="size-3.5" />
+        </Button>
+      )}
+
+      {onQuote && (
+        <Button
+          aria-label={t("chat_message.quote_message")}
+          disabled={actionDisabled}
+          onClick={() => {
+            void onQuote(message);
+          }}
+          size="icon-xs"
+          title={t("chat_message.quote")}
+          type="button"
+          variant="ghost"
+        >
+          <Reply className="size-3.5" />
         </Button>
       )}
 
@@ -443,10 +480,16 @@ export const ChatMessage = React.memo(({
   isLastMessage = false,
   assistant,
   model,
+  deleteMessageIds,
+  regenerateMessageId,
+  forkMessageId,
+  disableEdit,
+  disableBranchSwitch,
   onEdit,
   onRegenerate,
   onSelectBranch,
   onDelete,
+  onQuote,
   onFork,
   onToolApproval,
 }: ChatMessageProps) => {
@@ -478,23 +521,29 @@ export const ChatMessage = React.memo(({
         </div>
       </div>
 
+      <ChatMessageAnnotationsRow annotations={message.annotations} alignRight={isUser} />
+
+      <ChatMessageNerdLineRow message={message} alignRight={isUser} />
+
       {showActions && (
         <ChatMessageActionsRow
           node={node}
           message={message}
           loading={loading}
           alignRight={isUser}
+          deleteMessageIds={deleteMessageIds}
+          regenerateMessageId={regenerateMessageId}
+          forkMessageId={forkMessageId}
+          disableEdit={disableEdit}
+          disableBranchSwitch={disableBranchSwitch}
           onEdit={onEdit}
           onRegenerate={onRegenerate}
           onSelectBranch={onSelectBranch}
           onDelete={onDelete}
+          onQuote={onQuote}
           onFork={onFork}
         />
       )}
-
-      <ChatMessageAnnotationsRow annotations={message.annotations} alignRight={isUser} />
-
-      <ChatMessageNerdLineRow message={message} alignRight={isUser} />
     </div>
   );
 });

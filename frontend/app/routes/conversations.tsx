@@ -14,7 +14,7 @@ import {
   ConversationContent,
   ConversationEmptyState,
 } from "~/components/extended/conversation";
-import { ChatInput } from "~/components/input/chat-input";
+import { ChatInput, type ChatInputSendOptions } from "~/components/input/chat-input";
 import { ChatMessage } from "~/components/message/chat-message";
 import { Drawer, DrawerContent } from "~/components/ui/drawer";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "~/components/ui/resizable";
@@ -44,6 +44,7 @@ import {
   type PagedResult,
   type ProviderModel,
   type Settings,
+  type TokenUsage,
   type UIMessagePart,
 } from "~/types";
 import { MessageSquare } from "lucide-react";
@@ -63,6 +64,18 @@ interface SelectedNodeMessage {
   node: MessageNodeDto;
   message: MessageNodeDto["messages"][number];
 }
+
+interface TimelineMessageItem {
+  id: string;
+  node: MessageNodeDto;
+  message: MessageDto;
+  deleteMessageIds?: string[];
+  regenerateMessageId?: string;
+  forkMessageId?: string;
+  disableEdit?: boolean;
+  disableBranchSwitch?: boolean;
+}
+
 type ConversationSummaryUpdater = (update: ReturnType<typeof toConversationSummaryUpdate>) => void;
 
 const EDIT_DRAFT_ATTACHMENT_MARK = "__from_message_attachment";
@@ -317,6 +330,221 @@ function buildEditedParts(session: EditingSession, draftParts: UIMessagePart[]):
   return [...preservedParts, ...appendedAttachments];
 }
 
+function getMessageRoleLabel(
+  role: string,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  switch (role.toUpperCase()) {
+    case "USER":
+      return t("conversations.quote.roles.user");
+    case "ASSISTANT":
+      return t("conversations.quote.roles.assistant");
+    case "SYSTEM":
+      return t("conversations.quote.roles.system");
+    case "TOOL":
+      return t("conversations.quote.roles.tool");
+    default:
+      return role;
+  }
+}
+
+function getImageParts(parts: UIMessagePart[]): Array<Extract<UIMessagePart, { type: "image" }>> {
+  return parts.filter((part): part is Extract<UIMessagePart, { type: "image" }> => part.type === "image");
+}
+
+function getImagePartIdentity(part: Extract<UIMessagePart, { type: "image" }>): string {
+  const fileId = part.metadata?.fileId;
+  if ((typeof fileId === "number" && Number.isFinite(fileId)) || typeof fileId === "string") {
+    return `file:${String(fileId)}`;
+  }
+
+  return `url:${part.url.trim()}`;
+}
+
+function mergeQuotedAndCurrentParts(
+  quotedMessage: MessageDto,
+  draftParts: UIMessagePart[],
+): UIMessagePart[] {
+  const seen = new Set<string>();
+  const mergedImages: UIMessagePart[] = [];
+  const pushImage = (part: Extract<UIMessagePart, { type: "image" }>) => {
+    const identity = getImagePartIdentity(part);
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    mergedImages.push(part);
+  };
+
+  getImageParts(quotedMessage.parts).forEach(pushImage);
+  getImageParts(draftParts).forEach(pushImage);
+
+  const textParts = draftParts.filter(
+    (part): part is Extract<UIMessagePart, { type: "text" }> => part.type === "text",
+  );
+  return [...textParts, ...mergedImages];
+}
+
+function partToQuoteText(
+  part: UIMessagePart,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  switch (part.type) {
+    case "text":
+      return part.text.trim();
+    case "image":
+      return t("conversations.quote.parts.image");
+    case "video":
+      return t("conversations.quote.parts.video");
+    case "audio":
+      return t("conversations.quote.parts.audio");
+    case "document":
+      return part.fileName.trim().length > 0
+        ? t("conversations.quote.parts.document_with_name", { name: part.fileName.trim() })
+        : t("conversations.quote.parts.document");
+    case "reasoning":
+      return part.reasoning.trim().length > 0
+        ? `${t("conversations.quote.parts.reasoning")}\n${part.reasoning.trim()}`
+        : t("conversations.quote.parts.reasoning");
+    case "tool":
+      return part.toolName.trim().length > 0
+        ? t("conversations.quote.parts.tool_with_name", { name: part.toolName.trim() })
+        : t("conversations.quote.parts.tool");
+  }
+}
+
+function buildQuoteContextText(
+  quotedMessage: MessageDto,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const header = t("conversations.quote.context_header", {
+    role: getMessageRoleLabel(quotedMessage.role, t),
+  });
+  const body = quotedMessage.parts
+    .map((part) => partToQuoteText(part, t))
+    .filter((value) => value.trim().length > 0)
+    .join("\n");
+
+  return `${header}\n${body || t("conversations.quote.parts.empty")}`;
+}
+
+function injectQuoteContextIntoDraftParts(
+  quotedMessage: MessageDto,
+  draftParts: UIMessagePart[],
+  t: (key: string, options?: Record<string, unknown>) => string,
+): UIMessagePart[] {
+  const quoteText = buildQuoteContextText(quotedMessage, t);
+  const textPartIndex = draftParts.findIndex((part) => part.type === "text");
+
+  if (textPartIndex >= 0) {
+    return draftParts.map((part, index) => {
+      if (index !== textPartIndex || part.type !== "text") {
+        return part;
+      }
+
+      const nextText = part.text.trim().length > 0 ? `${quoteText}\n\n${part.text}` : quoteText;
+      return {
+        ...part,
+        text: nextText,
+      };
+    });
+  }
+
+  return [{ type: "text", text: quoteText }, ...draftParts];
+}
+
+function isImageGenerationModel(model: ProviderModel | null | undefined): boolean {
+  if (!model || model.imageGenerationMode !== true) {
+    return false;
+  }
+
+  return (model.outputModalities ?? []).some((modality) => modality.toUpperCase() === "IMAGE");
+}
+
+function sumUsage(usages: Array<TokenUsage | null | undefined>): TokenUsage | null {
+  let hasUsage = false;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cachedTokens = 0;
+  let totalTokens = 0;
+
+  usages.forEach((usage) => {
+    if (!usage) return;
+    hasUsage = true;
+    promptTokens += usage.promptTokens ?? 0;
+    completionTokens += usage.completionTokens ?? 0;
+    cachedTokens += usage.cachedTokens ?? 0;
+    totalTokens += usage.totalTokens ?? 0;
+  });
+
+  if (!hasUsage) {
+    return null;
+  }
+
+  return {
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    totalTokens,
+  };
+}
+
+function buildGroupedTimelineItem(group: SelectedNodeMessage[]): TimelineMessageItem {
+  const first = group[0];
+  const last = group[group.length - 1];
+
+  if (group.length === 1) {
+    return {
+      id: first.message.id,
+      node: first.node,
+      message: first.message,
+    };
+  }
+
+  const mergedMessage: MessageDto = {
+    ...first.message,
+    parts: group.flatMap((item) => item.message.parts),
+    annotations: group.flatMap((item) => item.message.annotations ?? []),
+    finishedAt: last.message.finishedAt ?? first.message.finishedAt ?? null,
+    modelId: last.message.modelId ?? first.message.modelId ?? null,
+    usage: sumUsage(group.map((item) => item.message.usage)),
+    translation: last.message.translation ?? first.message.translation ?? null,
+  };
+
+  return {
+    id: first.message.id,
+    node: last.node,
+    message: mergedMessage,
+    deleteMessageIds: group.map((item) => item.message.id),
+    regenerateMessageId: first.message.id,
+    forkMessageId: last.message.id,
+    disableEdit: true,
+    disableBranchSwitch: true,
+  };
+}
+
+function groupTimelineMessages(selectedNodeMessages: SelectedNodeMessage[]): TimelineMessageItem[] {
+  const grouped: TimelineMessageItem[] = [];
+  let assistantGroup: SelectedNodeMessage[] = [];
+
+  const flushAssistantGroup = () => {
+    if (assistantGroup.length === 0) return;
+    grouped.push(buildGroupedTimelineItem(assistantGroup));
+    assistantGroup = [];
+  };
+
+  selectedNodeMessages.forEach((item) => {
+    if (item.message.role.toUpperCase() === "ASSISTANT") {
+      assistantGroup.push(item);
+      return;
+    }
+
+    flushAssistantGroup();
+    grouped.push(buildGroupedTimelineItem([item]));
+  });
+
+  flushAssistantGroup();
+  return grouped;
+}
+
 function applyNodeUpdate(
   conversation: ConversationDto,
   event: ConversationNodeUpdateEventDto,
@@ -505,27 +733,39 @@ function useDraftInputController({
     [draftKey, removeDraftPart],
   );
 
-  const handleSubmit = React.useCallback(async () => {
-    if (!draftKey) return;
+  const handleSubmit = React.useCallback(
+    async (options?: {
+      partsOverride?: UIMessagePart[];
+      imageGenerationMode?: ChatInputSendOptions["imageGenerationMode"];
+    }) => {
+      if (!draftKey) return;
 
-    const parts = getSubmitParts(draftKey);
-    if (parts.length === 0) return;
+      const parts = options?.partsOverride ?? getSubmitParts(draftKey);
+      if (parts.length === 0) return;
 
-    if (activeId) {
-      await api.post<{ status: string }>(`conversations/${activeId}/messages`, { parts });
+      if (activeId) {
+        await api.post<{ status: string }>(`conversations/${activeId}/messages`, {
+          parts,
+          imageGenerationMode: options?.imageGenerationMode,
+        });
+        clearDraft(draftKey);
+        return;
+      }
+
+      const conversationId = uuidv4();
+      setHomeDraftId(createHomeDraftId());
+
+      await api.post<{ status: string }>(`conversations/${conversationId}/messages`, {
+        parts,
+        imageGenerationMode: options?.imageGenerationMode,
+      });
       clearDraft(draftKey);
-      return;
-    }
 
-    const conversationId = uuidv4();
-    setHomeDraftId(createHomeDraftId());
-
-    await api.post<{ status: string }>(`conversations/${conversationId}/messages`, { parts });
-    clearDraft(draftKey);
-
-    navigate(`/c/${conversationId}`);
-    refreshList();
-  }, [activeId, clearDraft, draftKey, getSubmitParts, navigate, refreshList, setHomeDraftId]);
+      navigate(`/c/${conversationId}`);
+      refreshList();
+    },
+    [activeId, clearDraft, draftKey, getSubmitParts, navigate, refreshList, setHomeDraftId],
+  );
 
   const replaceDraft = React.useCallback(
     (text: string, parts: UIMessagePart[]) => {
@@ -573,6 +813,7 @@ const ConversationTimeline = React.memo(({
   contentClassName,
   onEdit,
   onDelete,
+  onQuote,
   onFork,
   onRegenerate,
   onSelectBranch,
@@ -588,23 +829,28 @@ const ConversationTimeline = React.memo(({
   conversationAssistantId: string | null;
   contentClassName?: string;
   onEdit: (message: MessageDto) => void | Promise<void>;
-  onDelete: (messageId: string) => Promise<void>;
+  onDelete: (messageIds: string | string[]) => Promise<void>;
+  onQuote: (message: MessageDto) => void | Promise<void>;
   onFork: (messageId: string) => Promise<void>;
   onRegenerate: (messageId: string) => Promise<void>;
   onSelectBranch: (nodeId: string, selectIndex: number) => Promise<void>;
   onToolApproval: (toolCallId: string, approved: boolean, reason: string) => Promise<void>;
 }) => {
   const { t } = useTranslation("page");
+  const timelineItems = React.useMemo(
+    () => groupTimelineMessages(selectedNodeMessages),
+    [selectedNodeMessages],
+  );
   const canQuickJump =
-    Boolean(activeId) && !detailLoading && !detailError && selectedNodeMessages.length > 1;
+    Boolean(activeId) && !detailLoading && !detailError && timelineItems.length > 1;
   const quickJumpItems = React.useMemo(
     () =>
-      selectedNodeMessages.map(({ message }) => ({
+      timelineItems.map(({ message }) => ({
         id: message.id,
         role: message.role,
         preview: getQuickJumpPreview(message, t),
       })),
-    [selectedNodeMessages, t],
+    [t, timelineItems],
   );
   const assistant = React.useMemo(() => {
     if (!settings || !conversationAssistantId) return null;
@@ -659,25 +905,32 @@ const ConversationTimeline = React.memo(({
         {!detailLoading &&
           !detailError &&
           activeId &&
-          selectedNodeMessages.map(({ node, message }, index) => {
+          timelineItems.map((item, index) => {
+            const { node, message } = item;
             const model = message.modelId ? (modelById.get(message.modelId) ?? null) : null;
 
             return (
               <div
-                key={message.id}
-                id={getConversationMessageAnchorId(message.id)}
+                key={item.id}
+                id={getConversationMessageAnchorId(item.id)}
                 className="scroll-mt-24"
               >
                 <ChatMessage
                   node={node}
                   message={message}
-                  previousRole={index > 0 ? selectedNodeMessages[index - 1]?.message.role : null}
-                  loading={isGenerating && index === selectedNodeMessages.length - 1}
-                  isLastMessage={index === selectedNodeMessages.length - 1}
+                  previousRole={index > 0 ? timelineItems[index - 1]?.message.role : null}
+                  loading={isGenerating && index === timelineItems.length - 1}
+                  isLastMessage={index === timelineItems.length - 1}
                   assistant={assistant}
                   model={model}
+                  deleteMessageIds={item.deleteMessageIds}
+                  regenerateMessageId={item.regenerateMessageId}
+                  forkMessageId={item.forkMessageId}
+                  disableEdit={item.disableEdit}
+                  disableBranchSwitch={item.disableBranchSwitch}
                   onEdit={onEdit}
                   onDelete={onDelete}
+                  onQuote={onQuote}
                   onFork={onFork}
                   onRegenerate={onRegenerate}
                   onSelectBranch={onSelectBranch}
@@ -746,6 +999,7 @@ function ConversationsPageInner() {
 
   const [homeDraftId, setHomeDraftId] = React.useState(() => createHomeDraftId());
   const [editingSession, setEditingSession] = React.useState<EditingSession | null>(null);
+  const [quotedMessage, setQuotedMessage] = React.useState<MessageDto | null>(null);
 
   const { detail, detailLoading, detailError, selectedNodeMessages, resetDetail } =
     useConversationDetail(activeId, updateConversationSummary);
@@ -796,6 +1050,7 @@ function ConversationsPageInner() {
 
   React.useEffect(() => {
     setEditingSession(null);
+    setQuotedMessage(null);
   }, [activeId]);
 
   const handleAssistantChange = React.useCallback(
@@ -956,9 +1211,12 @@ function ConversationsPageInner() {
   );
 
   const handleDeleteMessage = React.useCallback(
-    async (messageId: string) => {
+    async (messageIds: string | string[]) => {
       if (!activeId) return;
-      await api.delete<{ status: string }>(`conversations/${activeId}/messages/${messageId}`);
+      const ids = Array.isArray(messageIds) ? messageIds : [messageIds];
+      for (const messageId of ids) {
+        await api.delete<{ status: string }>(`conversations/${activeId}/messages/${messageId}`);
+      }
     },
     [activeId],
   );
@@ -1001,6 +1259,16 @@ function ConversationsPageInner() {
     clearCurrentDraft();
   }, [clearCurrentDraft]);
 
+  const handleQuoteMessage = React.useCallback(
+    (message: MessageDto) => {
+      if (editingSession) {
+        handleCancelEdit();
+      }
+      setQuotedMessage(message);
+    },
+    [editingSession, handleCancelEdit],
+  );
+
   const handleClickSuggestion = React.useCallback(
     (suggestion: string) => {
       if (editingSession) {
@@ -1011,9 +1279,40 @@ function ConversationsPageInner() {
     [editingSession, handleInputTextChange],
   );
 
-  const handleSend = React.useCallback(async () => {
+  const handleSend = React.useCallback(async (options?: ChatInputSendOptions) => {
     if (!editingSession) {
-      await handleSubmit();
+      const draftParts = getCurrentSubmitParts();
+
+      if (!quotedMessage) {
+        await handleSubmit({ imageGenerationMode: options?.imageGenerationMode });
+        return;
+      }
+
+      const currentModelId = currentAssistant?.chatModelId ?? settings?.chatModelId ?? null;
+      const currentModel =
+        settings?.providers
+          .flatMap((provider) => provider.models)
+          .find((model) => model.id === currentModelId) ?? null;
+
+      if (isImageGenerationModel(currentModel)) {
+        const mergedParts = mergeQuotedAndCurrentParts(quotedMessage, draftParts);
+        const imageCount = getImageParts(mergedParts).length;
+        if (imageCount === 0) {
+          toast.error(t("conversations.quote.no_image"), { duration: 2000 });
+          return;
+        }
+
+        await handleSubmit({
+          partsOverride: mergedParts,
+          imageGenerationMode: "new_image",
+        });
+      } else {
+        await handleSubmit({
+          partsOverride: injectQuoteContextIntoDraftParts(quotedMessage, draftParts, t),
+        });
+      }
+
+      setQuotedMessage(null);
       return;
     }
 
@@ -1031,7 +1330,17 @@ function ConversationsPageInner() {
 
     setEditingSession(null);
     clearCurrentDraft();
-  }, [activeId, clearCurrentDraft, editingSession, getCurrentSubmitParts, handleSubmit]);
+  }, [
+    activeId,
+    clearCurrentDraft,
+    currentAssistant?.chatModelId,
+    editingSession,
+    getCurrentSubmitParts,
+    handleSubmit,
+    quotedMessage,
+    settings,
+    t,
+  ]);
 
   const handleTogglePinConversation = React.useCallback(
     async (conversationId: string) => {
@@ -1140,6 +1449,7 @@ function ConversationsPageInner() {
             conversationAssistantId={detail?.assistantId ?? null}
             onEdit={handleStartEdit}
             onDelete={handleDeleteMessage}
+            onQuote={handleQuoteMessage}
             onFork={handleForkMessage}
             onRegenerate={handleRegenerate}
             onSelectBranch={handleSelectBranch}
@@ -1173,6 +1483,10 @@ function ConversationsPageInner() {
           onAddParts={handleAddInputParts}
           suggestions={showSuggestions ? chatSuggestions : []}
           onSuggestionClick={handleClickSuggestion}
+          quotedMessage={quotedMessage}
+          onClearQuote={() => {
+            setQuotedMessage(null);
+          }}
           isEditing={Boolean(editingSession)}
           onCancelEdit={editingSession ? handleCancelEdit : undefined}
           shouldDeleteFileOnRemove={shouldDeleteAttachmentFileOnRemove}

@@ -14,6 +14,8 @@
     "delete_confirm": "Delete this message?",
     "copy_message": "Copy message",
     "copy": "Copy",
+    "quote_message": "Quote message",
+    "quote": "Quote",
     "edit_message": "Edit message",
     "edit": "Edit",
     "regenerate": "Regenerate",

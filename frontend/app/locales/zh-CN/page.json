@@ -18,6 +18,27 @@
     "errors": {
       "load_detail_failed": "加载会话详情失败"
     },
+    "quote": {
+      "no_image": "引用消息和当前消息里都没有可用于生图的图片",
+      "context_header": "[引用{{role}}消息]",
+      "roles": {
+        "user": "用户",
+        "assistant": "助手",
+        "system": "系统",
+        "tool": "工具"
+      },
+      "parts": {
+        "image": "[图片]",
+        "video": "[视频]",
+        "audio": "[音频]",
+        "document": "[文档]",
+        "document_with_name": "[文档] {{name}}",
+        "reasoning": "[思考]",
+        "tool": "[工具调用]",
+        "tool_with_name": "[工具] {{name}}",
+        "empty": "[空消息]"
+      }
+    },
     "empty_state": {
       "select_title": "请选择会话",
       "select_description": "选择左侧会话以查看消息",

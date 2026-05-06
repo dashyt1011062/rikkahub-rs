@@ -18,6 +18,27 @@
     "errors": {
       "load_detail_failed": "Failed to load conversation details"
     },
+    "quote": {
+      "no_image": "Neither the quoted message nor the current message contains an image that can be used for image generation",
+      "context_header": "[Quoted {{role}} message]",
+      "roles": {
+        "user": "User",
+        "assistant": "Assistant",
+        "system": "System",
+        "tool": "Tool"
+      },
+      "parts": {
+        "image": "[Image]",
+        "video": "[Video]",
+        "audio": "[Audio]",
+        "document": "[Document]",
+        "document_with_name": "[Document] {{name}}",
+        "reasoning": "[Thinking]",
+        "tool": "[Tool call]",
+        "tool_with_name": "[Tool] {{name}}",
+        "empty": "[Empty message]"
+      }
+    },
     "empty_state": {
       "select_title": "Select a conversation",
       "select_description": "Pick a conversation from the sidebar to view messages",

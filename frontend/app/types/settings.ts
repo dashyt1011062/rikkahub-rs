@@ -102,6 +102,7 @@ export interface ProviderModel {
   modelId: string;
   displayName: string;
   type: ModelType;
+  imageGenerationMode?: boolean;
   inputModalities?: ModelModality[];
   outputModalities?: ModelModality[];
   abilities?: ModelAbility[];

@@ -16,6 +16,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
+import { useCurrentModel } from "~/hooks/use-current-model";
 import { ModelList } from "~/components/input/model-list";
 import { ReasoningPickerButton } from "~/components/input/reasoning-picker";
 import { SearchPickerButton } from "~/components/input/search-picker";
@@ -23,6 +24,7 @@ import { McpPickerButton } from "~/components/input/mcp-picker";
 import { InjectionPickerButton } from "~/components/input/injection-picker";
 import { useSettingsStore } from "~/stores";
 import { Button } from "~/components/ui/button";
+import { ToggleGroup, ToggleGroupItem } from "~/components/ui/toggle-group";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,7 +35,11 @@ import { Textarea } from "~/components/ui/textarea";
 import { resolveManagedFileUrl } from "~/lib/files";
 import { cn } from "~/lib/utils";
 import api from "~/services/api";
-import type { UIMessagePart, UploadFilesResponseDto } from "~/types";
+import type { MessageDto, ProviderModel, UIMessagePart, UploadFilesResponseDto } from "~/types";
+
+export interface ChatInputSendOptions {
+  imageGenerationMode?: "new_image" | "continue_image";
+}
 
 export interface ChatInputProps {
   value: string;
@@ -43,13 +49,15 @@ export interface ChatInputProps {
   disabled?: boolean;
   isGenerating?: boolean;
   isEditing?: boolean;
+  quotedMessage?: MessageDto | null;
   onValueChange: (value: string) => void;
   onAddParts: (parts: UIMessagePart[]) => void;
   shouldDeleteFileOnRemove?: (part: UIMessagePart) => boolean;
   onRemovePart: (index: number, part: UIMessagePart) => Promise<void> | void;
-  onSend: () => Promise<void> | void;
+  onSend: (options?: ChatInputSendOptions) => Promise<void> | void;
   onStop?: () => Promise<void> | void;
   onCancelEdit?: () => void;
+  onClearQuote?: () => void;
   onSuggestionClick?: (suggestion: string) => void;
   className?: string;
 }
@@ -157,6 +165,70 @@ function hasFilesInDataTransfer(dataTransfer: DataTransfer | null): boolean {
   return Array.from(dataTransfer.items).some((item) => item.kind === "file");
 }
 
+function isImageGenerationModel(model: ProviderModel | null): boolean {
+  if (!model || model.imageGenerationMode !== true) {
+    return false;
+  }
+
+  return (model.outputModalities ?? []).some((modality) => modality.toUpperCase() === "IMAGE");
+}
+
+function truncateValue(value: string, maxLength = 80): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function getQuotedMessagePreview(
+  message: MessageDto,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const textPreview = message.parts
+    .filter((part): part is Extract<UIMessagePart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text.trim())
+    .find((text) => text.length > 0);
+
+  if (textPreview) {
+    return truncateValue(textPreview.replace(/\s+/g, " "));
+  }
+
+  const imageCount = message.parts.filter((part) => part.type === "image").length;
+  if (imageCount > 0) {
+    return imageCount === 1
+      ? t("chat.quote_preview_image")
+      : t("chat.quote_preview_images", { count: imageCount });
+  }
+
+  const documentCount = message.parts.filter((part) => part.type === "document").length;
+  if (documentCount > 0) {
+    return documentCount === 1
+      ? t("chat.quote_preview_document")
+      : t("chat.quote_preview_documents", { count: documentCount });
+  }
+
+  return t("chat.quote_preview_empty");
+}
+
+function getQuotedMessageRoleLabel(
+  role: string,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  switch (role.toUpperCase()) {
+    case "USER":
+      return t("chat.quote_role_user");
+    case "ASSISTANT":
+      return t("chat.quote_role_assistant");
+    case "SYSTEM":
+      return t("chat.quote_role_system");
+    case "TOOL":
+      return t("chat.quote_role_tool");
+    default:
+      return role;
+  }
+}
+
 export function ChatInput({
   value,
   attachments,
@@ -165,6 +237,7 @@ export function ChatInput({
   disabled = false,
   isGenerating = false,
   isEditing = false,
+  quotedMessage = null,
   onValueChange,
   onAddParts,
   shouldDeleteFileOnRemove,
@@ -172,6 +245,7 @@ export function ChatInput({
   onSend,
   onStop,
   onCancelEdit,
+  onClearQuote,
   onSuggestionClick,
   className,
 }: ChatInputProps) {
@@ -180,6 +254,7 @@ export function ChatInput({
     (state) => state.settings?.displaySetting.sendOnEnter ?? true,
   );
   const { currentAssistant } = useCurrentAssistant();
+  const { currentModel } = useCurrentModel();
 
   const quickMessages = React.useMemo(() => {
     const source = currentAssistant?.quickMessages;
@@ -211,8 +286,12 @@ export function ChatInput({
   const [uploadMenuOpen, setUploadMenuOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [dragActive, setDragActive] = React.useState(false);
+  const [imageGenerationMode, setImageGenerationMode] = React.useState<
+    ChatInputSendOptions["imageGenerationMode"]
+  >("new_image");
   const dragDepthRef = React.useRef(0);
 
+  const supportsImageGenerationMode = isImageGenerationModel(currentModel);
   const isEmpty = value.trim().length === 0 && attachments.length === 0;
 
   const canStop = ready && Boolean(onStop) && isGenerating && !disabled;
@@ -228,6 +307,12 @@ export function ChatInput({
       dragDepthRef.current = 0;
     }
   }, [canUpload]);
+
+  React.useEffect(() => {
+    if (!supportsImageGenerationMode) {
+      setImageGenerationMode("new_image");
+    }
+  }, [supportsImageGenerationMode]);
 
   const uploadFiles = React.useCallback(
     async (fileList: FileList | globalThis.File[] | null) => {
@@ -277,7 +362,11 @@ export function ChatInput({
       }
 
       if (canSend) {
-        await onSend();
+        await onSend(
+          supportsImageGenerationMode
+            ? { imageGenerationMode }
+            : undefined,
+        );
       }
     } catch (submitError) {
       const message = submitError instanceof Error ? submitError.message : t("chat.send_failed");
@@ -465,6 +554,32 @@ export function ChatInput({
             </div>
           ) : null}
 
+          {quotedMessage ? (
+            <div className="flex items-start justify-between gap-3 rounded-xl border border-border/70 bg-background/80 px-3 py-2 text-xs">
+              <div className="min-w-0">
+                <div className="text-foreground/80">
+                  {t("chat.quote_label", {
+                    role: getQuotedMessageRoleLabel(quotedMessage.role, t),
+                  })}
+                </div>
+                <div className="mt-1 truncate text-muted-foreground">
+                  {getQuotedMessagePreview(quotedMessage, t)}
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="shrink-0"
+                onClick={onClearQuote}
+                disabled={submitting || uploading}
+                title={t("chat.clear_quote")}
+              >
+                <X className="size-3.5" />
+              </Button>
+            </div>
+          ) : null}
+
           {suggestions.length > 0 ? (
             <div className="flex gap-2 overflow-x-auto rounded-lg px-1 py-1">
               {suggestions.map((suggestion, index) => (
@@ -600,6 +715,37 @@ export function ChatInput({
               <SearchPickerButton disabled={!canUseToolbarControls} />
               <ReasoningPickerButton disabled={!canUseToolbarControls} />
               <McpPickerButton disabled={!canUseToolbarControls} />
+              {supportsImageGenerationMode ? (
+                <ToggleGroup
+                  type="single"
+                  value={imageGenerationMode}
+                  onValueChange={(nextValue) => {
+                    if (nextValue === "new_image" || nextValue === "continue_image") {
+                      setImageGenerationMode(nextValue);
+                    }
+                  }}
+                  variant="outline"
+                  size="sm"
+                  className="h-8 rounded-full border bg-background/70 px-0.5"
+                >
+                  <ToggleGroupItem
+                    value="new_image"
+                    aria-label={t("chat.image_generation_mode_new")}
+                    className="h-7 rounded-full px-2 text-xs"
+                    disabled={!canUseToolbarControls}
+                  >
+                    {t("chat.image_generation_mode_new")}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem
+                    value="continue_image"
+                    aria-label={t("chat.image_generation_mode_continue")}
+                    className="h-7 rounded-full px-2 text-xs"
+                    disabled={!canUseToolbarControls}
+                  >
+                    {t("chat.image_generation_mode_continue")}
+                  </ToggleGroupItem>
+                </ToggleGroup>
+              ) : null}
               <InjectionPickerButton disabled={!canUseToolbarControls} />
               <QuickMessageButton
                 quickMessages={quickMessages}

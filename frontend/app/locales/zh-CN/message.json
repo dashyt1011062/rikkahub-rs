@@ -14,6 +14,8 @@
     "delete_confirm": "确认删除这条消息吗？",
     "copy_message": "复制消息",
     "copy": "复制",
+    "quote_message": "引用消息",
+    "quote": "引用",
     "edit_message": "编辑消息",
     "edit": "编辑",
     "regenerate": "重新生成",
