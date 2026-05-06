@@ -12,8 +12,8 @@ import {
   Ellipsis,
   GitFork,
   Pencil,
+  Quote,
   RefreshCw,
-  Reply,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -218,15 +218,16 @@ const ChatMessageActionsRow = React.memo(({
   const handleRegenerate = React.useCallback(async () => {
     if (!onRegenerate) return;
 
-    if (message.role === "USER") {
-      const confirmed = await confirm({
-        title: t("chat_message.regenerate"),
-        description: t("chat_message.regenerate_from_user_confirm"),
-        confirmText: t("chat_message.regenerate"),
-        cancelText: "Cancel",
-      });
-      if (!confirmed) return;
-    }
+    const confirmed = await confirm({
+      title: t("chat_message.regenerate"),
+      description:
+        message.role === "USER"
+          ? t("chat_message.regenerate_from_user_confirm")
+          : t("chat_message.regenerate_confirm"),
+      confirmText: t("chat_message.regenerate"),
+      cancelText: "Cancel",
+    });
+    if (!confirmed) return;
 
     setRegenerating(true);
     try {
@@ -313,6 +314,22 @@ const ChatMessageActionsRow = React.memo(({
         <Copy className="size-3.5" />
       </Button>
 
+      {onQuote && (
+        <Button
+          aria-label={t("chat_message.quote_message")}
+          disabled={actionDisabled}
+          onClick={() => {
+            void onQuote(message);
+          }}
+          size="icon-xs"
+          title={t("chat_message.quote")}
+          type="button"
+          variant="ghost"
+        >
+          <Quote className="size-3.5" />
+        </Button>
+      )}
+
       {canEdit && (
         <Button
           aria-label={t("chat_message.edit_message")}
@@ -326,22 +343,6 @@ const ChatMessageActionsRow = React.memo(({
           variant="ghost"
         >
           <Pencil className="size-3.5" />
-        </Button>
-      )}
-
-      {onQuote && (
-        <Button
-          aria-label={t("chat_message.quote_message")}
-          disabled={actionDisabled}
-          onClick={() => {
-            void onQuote(message);
-          }}
-          size="icon-xs"
-          title={t("chat_message.quote")}
-          type="button"
-          variant="ghost"
-        >
-          <Reply className="size-3.5" />
         </Button>
       )}
 
