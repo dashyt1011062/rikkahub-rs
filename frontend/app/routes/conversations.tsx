@@ -60,6 +60,16 @@ type ConversationStreamEvent =
   | ConversationNodeUpdateEventDto
   | ConversationErrorEventDto;
 
+interface ConversationDetailRefreshOptions {
+  showLoading?: boolean;
+  clearOnError?: boolean;
+  reportError?: boolean;
+}
+
+type ConversationDetailRefresher = (
+  options?: ConversationDetailRefreshOptions,
+) => Promise<ConversationDto | null>;
+
 interface SelectedNodeMessage {
   node: MessageNodeDto;
   message: MessageNodeDto["messages"][number];
@@ -582,12 +592,119 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
   const [detail, setDetail] = React.useState<ConversationDto | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [detailError, setDetailError] = React.useState<string | null>(null);
+  const activeIdRef = React.useRef(activeId);
+  const detailRef = React.useRef<ConversationDto | null>(null);
+  const mountedRef = React.useRef(true);
+  const requestVersionRef = React.useRef(0);
+  const scheduledRefreshRef = React.useRef<number | null>(null);
+
+  const clearScheduledRefresh = React.useCallback(() => {
+    if (scheduledRefreshRef.current === null) return;
+    clearTimeout(scheduledRefreshRef.current);
+    scheduledRefreshRef.current = null;
+  }, []);
+
+  const applyDetail = React.useCallback(
+    (nextDetail: ConversationDto) => {
+      const currentDetail = detailRef.current;
+      if (
+        currentDetail &&
+        currentDetail.id === nextDetail.id &&
+        currentDetail.updateAt > nextDetail.updateAt
+      ) {
+        return;
+      }
+
+      detailRef.current = nextDetail;
+      setDetail(nextDetail);
+      updateSummary(toConversationSummaryUpdate(nextDetail));
+    },
+    [updateSummary],
+  );
 
   const resetDetail = React.useCallback(() => {
+    clearScheduledRefresh();
+    detailRef.current = null;
     setDetail(null);
     setDetailError(null);
     setDetailLoading(false);
-  }, []);
+  }, [clearScheduledRefresh]);
+
+  const refreshDetail = React.useCallback<ConversationDetailRefresher>(
+    async ({ showLoading = false, clearOnError = false, reportError = true } = {}) => {
+      const conversationId = activeIdRef.current;
+      if (!conversationId) return null;
+
+      const requestVersion = ++requestVersionRef.current;
+      if (showLoading) {
+        setDetailLoading(true);
+        setDetailError(null);
+      }
+
+      try {
+        const nextDetail = await api.get<ConversationDto>(`conversations/${conversationId}`);
+        if (
+          !mountedRef.current ||
+          activeIdRef.current !== conversationId ||
+          requestVersion !== requestVersionRef.current
+        ) {
+          return null;
+        }
+
+        applyDetail(nextDetail);
+        setDetailError(null);
+        return nextDetail;
+      } catch (error) {
+        if (
+          reportError &&
+          mountedRef.current &&
+          activeIdRef.current === conversationId &&
+          requestVersion === requestVersionRef.current
+        ) {
+          setDetailError(
+            error instanceof Error && error.message
+              ? error.message
+              : t("conversations.errors.load_detail_failed"),
+          );
+          if (clearOnError) {
+            detailRef.current = null;
+            setDetail(null);
+          }
+        }
+        return null;
+      } finally {
+        if (
+          showLoading &&
+          mountedRef.current &&
+          activeIdRef.current === conversationId &&
+          requestVersion <= requestVersionRef.current
+        ) {
+          setDetailLoading(false);
+        }
+      }
+    },
+    [applyDetail, t],
+  );
+
+  const scheduleRefreshDetail = React.useCallback(() => {
+    if (scheduledRefreshRef.current !== null || typeof window === "undefined") return;
+    scheduledRefreshRef.current = window.setTimeout(() => {
+      scheduledRefreshRef.current = null;
+      void refreshDetail({ reportError: false });
+    }, 120);
+  }, [refreshDetail]);
+
+  React.useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  React.useEffect(
+    () => () => {
+      mountedRef.current = false;
+      clearScheduledRefresh();
+    },
+    [clearScheduledRefresh],
+  );
 
   React.useEffect(() => {
     if (!activeId) {
@@ -595,73 +712,116 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       return;
     }
 
-    let mounted = true;
-    setDetailLoading(true);
-    setDetailError(null);
+    let disposed = false;
+    let reconnectTimer: number | null = null;
+    let streamController: AbortController | null = null;
 
-    const abortController = new AbortController();
+    const clearReconnectTimer = () => {
+      if (reconnectTimer === null) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    };
 
-    api
-      .get<ConversationDto>(`conversations/${activeId}`)
-      .then((data) => {
-        if (!mounted) return;
-        setDetail(data);
-        updateSummary(toConversationSummaryUpdate(data));
-      })
-      .catch((err: Error) => {
-        if (!mounted) return;
-        setDetailError(err.message || t("conversations.errors.load_detail_failed"));
-        setDetail(null);
-      })
-      .finally(() => {
-        if (!mounted) return;
-        setDetailLoading(false);
-      });
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null || typeof window === "undefined") return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectStream();
+      }, 1000);
+    };
 
-    void sse<ConversationStreamEvent>(
-      `conversations/${activeId}/stream`,
-      {
-        onMessage: ({ event, data }) => {
-          if (!mounted) return;
+    const connectStream = () => {
+      if (disposed) return;
+      const nextController = new AbortController();
+      streamController = nextController;
 
-          if (event === "error" && data.type === "error") {
-            toast.error(data.message);
-            return;
-          }
+      void sse<ConversationStreamEvent>(
+        `conversations/${activeId}/stream`,
+        {
+          onMessage: ({ event, data }) => {
+            if (disposed) return;
 
-          if (event === "snapshot" && data.type === "snapshot") {
-            setDetail(data.conversation);
-            updateSummary(toConversationSummaryUpdate(data.conversation));
+            if (event === "error" && data.type === "error") {
+              toast.error(data.message);
+              return;
+            }
+
+            if (event === "snapshot" && data.type === "snapshot") {
+              applyDetail(data.conversation);
+              setDetailError(null);
+              setDetailLoading(false);
+              return;
+            }
+
+            if (event !== "node_update" || data.type !== "node_update") return;
+
+            const currentDetail = detailRef.current;
+            if (!currentDetail) {
+              scheduleRefreshDetail();
+              return;
+            }
+
+            const nextDetail = applyNodeUpdate(currentDetail, data);
+            if (nextDetail === currentDetail) {
+              scheduleRefreshDetail();
+              return;
+            }
+
+            applyDetail(nextDetail);
             setDetailError(null);
             setDetailLoading(false);
-            return;
-          }
-
-          if (event !== "node_update" || data.type !== "node_update") return;
-
-          setDetail((prev) => {
-            if (!prev) return prev;
-            const next = applyNodeUpdate(prev, data);
-            if (next === prev) return prev;
-            updateSummary(toConversationSummaryUpdate(next));
-            return next;
-          });
-          setDetailError(null);
-          setDetailLoading(false);
+          },
+          onError: (streamError) => {
+            if (disposed) return;
+            console.error("Conversation detail SSE error:", streamError);
+            scheduleRefreshDetail();
+            scheduleReconnect();
+          },
+          onClose: () => {
+            if (disposed || nextController.signal.aborted) return;
+            scheduleReconnect();
+          },
         },
-        onError: (streamError) => {
-          if (!mounted) return;
-          console.error("Conversation detail SSE error:", streamError);
-        },
-      },
-      { signal: abortController.signal },
-    );
+        { signal: nextController.signal },
+      );
+    };
+
+    void refreshDetail({ showLoading: true, clearOnError: true });
+    connectStream();
 
     return () => {
-      mounted = false;
-      abortController.abort();
+      disposed = true;
+      clearReconnectTimer();
+      streamController?.abort();
     };
-  }, [activeId, resetDetail, t, updateSummary]);
+  }, [activeId, applyDetail, refreshDetail, resetDetail, scheduleRefreshDetail]);
+
+  React.useEffect(() => {
+    if (!activeId || typeof document === "undefined") return;
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        scheduleRefreshDetail();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activeId, scheduleRefreshDetail]);
+
+  React.useEffect(() => {
+    if (!detail?.isGenerating) return;
+
+    const timer = window.setInterval(() => {
+      void refreshDetail({ reportError: false });
+    }, 2000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [detail?.id, detail?.isGenerating, refreshDetail]);
 
   const selectedNodeMessages = React.useMemo<SelectedNodeMessage[]>(() => {
     if (!detail) return [];
@@ -677,6 +837,7 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     detailError,
     selectedNodeMessages,
     resetDetail,
+    refreshDetail,
   };
 }
 
@@ -687,6 +848,7 @@ function useDraftInputController({
   setHomeDraftId,
   navigate,
   refreshList,
+  refreshDetail,
 }: {
   activeId: string | null;
   isHomeRoute: boolean;
@@ -694,6 +856,7 @@ function useDraftInputController({
   setHomeDraftId: React.Dispatch<React.SetStateAction<string>>;
   navigate: ReturnType<typeof useNavigate>;
   refreshList: () => void;
+  refreshDetail: ConversationDetailRefresher;
 }) {
   const draftKey = activeId ?? (isHomeRoute ? homeDraftId : null);
   const draft = useChatInputStore(
@@ -749,6 +912,7 @@ function useDraftInputController({
           imageGenerationMode: options?.imageGenerationMode,
         });
         clearDraft(draftKey);
+        await refreshDetail({ reportError: false });
         return;
       }
 
@@ -764,7 +928,7 @@ function useDraftInputController({
       navigate(`/c/${conversationId}`);
       refreshList();
     },
-    [activeId, clearDraft, draftKey, getSubmitParts, navigate, refreshList, setHomeDraftId],
+    [activeId, clearDraft, draftKey, getSubmitParts, navigate, refreshDetail, refreshList, setHomeDraftId],
   );
 
   const replaceDraft = React.useCallback(
@@ -1001,7 +1165,7 @@ function ConversationsPageInner() {
   const [editingSession, setEditingSession] = React.useState<EditingSession | null>(null);
   const [quotedMessage, setQuotedMessage] = React.useState<MessageDto | null>(null);
 
-  const { detail, detailLoading, detailError, selectedNodeMessages, resetDetail } =
+  const { detail, detailLoading, detailError, selectedNodeMessages, resetDetail, refreshDetail } =
     useConversationDetail(activeId, updateConversationSummary);
 
   const {
@@ -1022,6 +1186,7 @@ function ConversationsPageInner() {
     setHomeDraftId,
     navigate,
     refreshList,
+    refreshDetail,
   });
 
   const activeConversation = conversations.find((item) => item.id === activeId);
@@ -1186,8 +1351,9 @@ function ConversationsPageInner() {
         approved,
         reason,
       });
+      await refreshDetail({ reportError: false });
     },
-    [activeId],
+    [activeId, refreshDetail],
   );
 
   const handleRegenerate = React.useCallback(
@@ -1196,8 +1362,9 @@ function ConversationsPageInner() {
       await api.post<{ status: string }>(`conversations/${activeId}/regenerate`, {
         messageId,
       });
+      await refreshDetail({ reportError: false });
     },
-    [activeId],
+    [activeId, refreshDetail],
   );
 
   const handleSelectBranch = React.useCallback(
@@ -1206,8 +1373,9 @@ function ConversationsPageInner() {
       await api.post<{ status: string }>(`conversations/${activeId}/nodes/${nodeId}/select`, {
         selectIndex,
       });
+      await refreshDetail({ reportError: false });
     },
-    [activeId],
+    [activeId, refreshDetail],
   );
 
   const handleDeleteMessage = React.useCallback(
@@ -1217,8 +1385,9 @@ function ConversationsPageInner() {
       for (const messageId of ids) {
         await api.delete<{ status: string }>(`conversations/${activeId}/messages/${messageId}`);
       }
+      await refreshDetail({ reportError: false });
     },
-    [activeId],
+    [activeId, refreshDetail],
   );
 
   const handleForkMessage = React.useCallback(
@@ -1330,6 +1499,7 @@ function ConversationsPageInner() {
 
     setEditingSession(null);
     clearCurrentDraft();
+    await refreshDetail({ reportError: false });
   }, [
     activeId,
     clearCurrentDraft,
@@ -1338,6 +1508,7 @@ function ConversationsPageInner() {
     getCurrentSubmitParts,
     handleSubmit,
     quotedMessage,
+    refreshDetail,
     settings,
     t,
   ]);
@@ -1414,7 +1585,8 @@ function ConversationsPageInner() {
   const handleStop = React.useCallback(async () => {
     if (!activeId) return;
     await api.post<{ status: string }>(`conversations/${activeId}/stop`);
-  }, [activeId]);
+    await refreshDetail({ reportError: false });
+  }, [activeId, refreshDetail]);
 
   const hasWorkbenchPanel = Boolean(panel);
   const workbenchPanelRef = React.useRef<PanelImperativeHandle | null>(null);
