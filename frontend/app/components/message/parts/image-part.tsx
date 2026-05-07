@@ -275,7 +275,7 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
       <Dialog open={previewOpen} onOpenChange={handleOpenChange}>
         <DialogContent
           showCloseButton={false}
-          className="top-0 left-0 h-screen w-screen max-w-none translate-x-0 translate-y-0 gap-0 rounded-none border-0 bg-black/92 p-0 shadow-none"
+          className="inset-0 h-screen w-screen max-w-none translate-x-0 translate-y-0 gap-0 rounded-none border-0 bg-black/92 p-0 shadow-none sm:max-w-none"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
           }}
