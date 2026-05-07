@@ -97,6 +97,8 @@
     "quote_preview_empty": "[空消息]",
     "image_generation_mode_new": "新图",
     "image_generation_mode_continue": "续图",
+    "rich_text_rendering_on": "Markdown / LaTeX 渲染已开启",
+    "rich_text_rendering_off": "Markdown / LaTeX 渲染已关闭",
     "quick_message_default_title": "快捷消息",
     "upload_failed": "上传失败",
     "send_failed": "发送失败",

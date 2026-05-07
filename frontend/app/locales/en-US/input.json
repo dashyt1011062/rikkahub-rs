@@ -97,6 +97,8 @@
     "quote_preview_empty": "[Empty message]",
     "image_generation_mode_new": "New",
     "image_generation_mode_continue": "Continue",
+    "rich_text_rendering_on": "Markdown / LaTeX rendering enabled",
+    "rich_text_rendering_off": "Markdown / LaTeX rendering disabled",
     "quick_message_default_title": "Quick Message",
     "upload_failed": "Upload failed",
     "send_failed": "Send failed",

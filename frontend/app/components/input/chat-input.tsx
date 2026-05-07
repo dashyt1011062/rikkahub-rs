@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {
   ArrowUp,
+  Code2,
   File,
   Image,
   LoaderCircle,
@@ -24,7 +25,9 @@ import { McpPickerButton } from "~/components/input/mcp-picker";
 import { InjectionPickerButton } from "~/components/input/injection-picker";
 import { useSettingsStore } from "~/stores";
 import { Button } from "~/components/ui/button";
+import { Toggle } from "~/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "~/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -378,6 +381,10 @@ export function ChatInput({
   );
   const currentAssistant = useCurrentAssistantProfile();
   const { currentModel } = useCurrentModelSelection();
+  const richTextRenderingEnabled = useSettingsStore(
+    (state) => state.richTextRenderingEnabled,
+  );
+  const toggleRichTextRendering = useSettingsStore((state) => state.toggleRichTextRendering);
 
   const quickMessages = React.useMemo(() => {
     const source = currentAssistant?.quickMessages;
@@ -854,6 +861,29 @@ export function ChatInput({
               <SearchPickerButton disabled={!canUseToolbarControls} />
               <ReasoningPickerButton disabled={!canUseToolbarControls} />
               <McpPickerButton disabled={!canUseToolbarControls} />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Toggle
+                    pressed={richTextRenderingEnabled}
+                    onPressedChange={toggleRichTextRendering}
+                    variant="outline"
+                    size="sm"
+                    className="size-8 rounded-full bg-background/70 px-0 text-muted-foreground data-[state=on]:text-foreground"
+                    aria-label={
+                      richTextRenderingEnabled
+                        ? t("chat.rich_text_rendering_on")
+                        : t("chat.rich_text_rendering_off")
+                    }
+                  >
+                    <Code2 className="size-4" />
+                  </Toggle>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {richTextRenderingEnabled
+                    ? t("chat.rich_text_rendering_on")
+                    : t("chat.rich_text_rendering_off")}
+                </TooltipContent>
+              </Tooltip>
               {supportsImageGenerationMode ? (
                 <ToggleGroup
                   type="single"

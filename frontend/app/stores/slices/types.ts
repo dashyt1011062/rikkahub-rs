@@ -20,4 +20,10 @@ export interface ChatInputSlice {
   getSubmitParts: (conversationId: string) => UIMessagePart[];
 }
 
-export type AppStoreState = SettingsSlice & ChatInputSlice;
+export interface UiPreferencesSlice {
+  richTextRenderingEnabled: boolean;
+  setRichTextRenderingEnabled: (enabled: boolean) => void;
+  toggleRichTextRendering: () => void;
+}
+
+export type AppStoreState = SettingsSlice & ChatInputSlice & UiPreferencesSlice;
