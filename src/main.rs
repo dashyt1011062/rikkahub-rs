@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod db;
+mod document_parser;
 mod engine;
 mod error;
 mod events;

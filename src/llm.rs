@@ -8,6 +8,7 @@ use reqwest::RequestBuilder;
 use serde_json::{json, Map, Value};
 
 use crate::db::{self, ConversationDto, MessageDto};
+use crate::document_parser;
 use crate::error::{AppError, AppResult};
 use crate::file_storage;
 use crate::mcp::{self, AvailableTool};
@@ -866,7 +867,7 @@ async fn build_openai_messages(
 
 async fn openai_user_content_for_message(state: &AppState, account_id: &str, message: &MessageDto, role: &str) -> AppResult<Value> {
     if role == "system" {
-        return Ok(Value::String(prompt_text(&message.parts)));
+        return Ok(Value::String(prompt_text_with_documents(state, account_id, &message.parts).await?));
     }
     let mut blocks = Vec::new();
     for part in &message.parts {
@@ -883,8 +884,8 @@ async fn openai_user_content_for_message(state: &AppState, account_id: &str, mes
                 }
             }
             "document" => {
-                let name = part.get("fileName").and_then(Value::as_str).unwrap_or("document");
-                blocks.push(json!({ "type": "text", "text": format!("[document: {name}]") }));
+                let text = document_context_for_part(state, account_id, part).await?;
+                blocks.push(json!({ "type": "text", "text": text }));
             }
             _ => {}
         }
@@ -1039,7 +1040,7 @@ async fn build_provider_messages(
         }
         .to_string();
         if role == "system" {
-            let text = prompt_text(&message.parts);
+            let text = prompt_text_with_documents(state, account_id, &message.parts).await?;
             if !text.trim().is_empty() {
                 out.push(ProviderChatMessage {
                     role,
@@ -1052,7 +1053,7 @@ async fn build_provider_messages(
         let text = if role == "assistant" {
             parts_to_plain_text(&message.parts)
         } else {
-            prompt_text(&message.parts)
+            prompt_text_with_documents(state, account_id, &message.parts).await?
         };
         let image_urls = if role == "user" {
             image_urls_from_parts(state, account_id, &message.parts).await?
@@ -1744,6 +1745,138 @@ fn prompt_text(parts: &[Value]) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+async fn prompt_text_with_documents(state: &AppState, account_id: &str, parts: &[Value]) -> AppResult<String> {
+    let mut items = Vec::new();
+    for part in parts {
+        let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+        match kind {
+            "text" => {
+                if let Some(text) = part.get("text").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+                    items.push(text.to_string());
+                }
+            }
+            "document" => items.push(document_context_for_part(state, account_id, part).await?),
+            _ => {}
+        }
+    }
+    Ok(items.join("\n").trim().to_string())
+}
+
+async fn document_context_for_part(state: &AppState, account_id: &str, part: &Value) -> AppResult<String> {
+    let fallback_name = part
+        .get("fileName")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("document");
+    let fallback_mime = part
+        .get("mime")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("application/octet-stream");
+
+    let Some(file_id) = part_file_id(part) else {
+        return Ok(format_document_unavailable(
+            fallback_name,
+            fallback_mime,
+            "the file id is missing, so the server cannot read and parse this document",
+        ));
+    };
+
+    let file = match db::get_file_by_id(
+        state.config.db_path.clone(),
+        account_id.to_string(),
+        file_id,
+    )
+    .await
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(format_document_unavailable(
+                fallback_name,
+                fallback_mime,
+                &format!("file lookup failed: {}", error.message),
+            ));
+        }
+    };
+
+    let name = if file.display_name.trim().is_empty() {
+        fallback_name
+    } else {
+        file.display_name.as_str()
+    };
+    let mime = if file.mime_type.trim().is_empty() {
+        fallback_mime
+    } else {
+        file.mime_type.as_str()
+    };
+
+    let bytes_result = match file_storage::read_local_file_bytes(&state.config.data_dir, &file).await {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(format_document_unavailable(
+                name,
+                mime,
+                &format!("local file read failed: {}", error.message),
+            ));
+        }
+    };
+    let Some((bytes, detected_mime)) = bytes_result else {
+        return Ok(format_document_unavailable(
+            name,
+            mime,
+            "the document is stored remotely and cannot be parsed locally; re-upload it to store a local copy",
+        ));
+    };
+    let parse_mime = if detected_mime.trim().is_empty() {
+        mime
+    } else {
+        detected_mime.as_str()
+    };
+
+    match document_parser::extract_document_text(name, parse_mime, &bytes) {
+        Ok(extracted) => Ok(format_document_context(name, parse_mime, &extracted.text, extracted.truncated)),
+        Err(error) => Ok(format_document_unavailable(name, parse_mime, &error)),
+    }
+}
+
+fn part_file_id(part: &Value) -> Option<i64> {
+    part.get("metadata")
+        .and_then(|metadata| metadata.get("fileId"))
+        .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|text| text.parse().ok())))
+}
+
+fn format_document_context(name: &str, mime: &str, text: &str, truncated: bool) -> String {
+    let note = if truncated {
+        "\nNote: the document text was truncated before sending."
+    } else {
+        ""
+    };
+    format!(
+        "[Document]\nName: {}\nMIME: {}\nContent:\n{}\n[/Document]{}",
+        clean_prompt_label(name),
+        clean_prompt_label(mime),
+        if text.trim().is_empty() { "[No extractable text was found.]" } else { text.trim() },
+        note
+    )
+}
+
+fn format_document_unavailable(name: &str, mime: &str, reason: &str) -> String {
+    format!(
+        "[Document]\nName: {}\nMIME: {}\nContent:\n[Unable to extract document text locally: {}]\n[/Document]",
+        clean_prompt_label(name),
+        clean_prompt_label(mime),
+        clean_prompt_label(reason)
+    )
+}
+
+fn clean_prompt_label(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn requested_image_mode(parts: &[Value]) -> String {

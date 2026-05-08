@@ -24,7 +24,7 @@ pub async fn store_bytes(
     mime_type: String,
     bytes: Bytes,
 ) -> AppResult<StoredFile> {
-    if uses_imgpile_storage(&state.config.file_storage) {
+    if uses_imgpile_storage(&state.config.file_storage) && mime_type.trim().to_ascii_lowercase().starts_with("image/") {
         let upload = imgpile::upload_bytes(
             state.http.clone(),
             state.config.imgpile_key.clone(),
