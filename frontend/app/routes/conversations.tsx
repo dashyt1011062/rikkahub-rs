@@ -666,6 +666,36 @@ function applyNodeUpdate(
   };
 }
 
+function applyOptimisticRegenerate(
+  conversation: ConversationDto,
+  messageId: string,
+): ConversationDto {
+  const targetIndex = conversation.messages.findIndex((node) =>
+    node.messages.some((message) => message.id === messageId),
+  );
+
+  if (targetIndex < 0) {
+    return conversation;
+  }
+
+  const targetMessage = conversation.messages[targetIndex].messages.find(
+    (message) => message.id === messageId,
+  );
+  const keepCount =
+    targetMessage?.role.toUpperCase() === "ASSISTANT" ? targetIndex : targetIndex + 1;
+
+  if (keepCount >= conversation.messages.length && conversation.isGenerating) {
+    return conversation;
+  }
+
+  return {
+    ...conversation,
+    messages: conversation.messages.slice(0, keepCount),
+    isGenerating: true,
+    updateAt: conversation.updateAt + 1,
+  };
+}
+
 function useConversationDetail(activeId: string | null, updateSummary: ConversationSummaryUpdater) {
   const { t } = useTranslation("page");
   const [detail, setDetail] = React.useState<ConversationDto | null>(null);
@@ -773,6 +803,21 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       void refreshDetail({ reportError: false });
     }, 120);
   }, [refreshDetail]);
+
+  const optimisticRegenerate = React.useCallback(
+    (messageId: string) => {
+      const currentDetail = detailRef.current;
+      if (!currentDetail) return;
+
+      const nextDetail = applyOptimisticRegenerate(currentDetail, messageId);
+      if (nextDetail === currentDetail) return;
+
+      detailRef.current = nextDetail;
+      setDetail(nextDetail);
+      updateSummary(toConversationSummaryUpdate(nextDetail));
+    },
+    [updateSummary],
+  );
 
   React.useEffect(() => {
     activeIdRef.current = activeId;
@@ -921,6 +966,7 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     selectedNodeMessages,
     resetDetail,
     refreshDetail,
+    optimisticRegenerate,
   };
 }
 
@@ -1250,8 +1296,15 @@ function ConversationsPageInner() {
   const [editingSession, setEditingSession] = React.useState<EditingSession | null>(null);
   const [quotedMessage, setQuotedMessage] = React.useState<MessageDto | null>(null);
 
-  const { detail, detailLoading, detailError, selectedNodeMessages, resetDetail, refreshDetail } =
-    useConversationDetail(activeId, updateConversationSummary);
+  const {
+    detail,
+    detailLoading,
+    detailError,
+    selectedNodeMessages,
+    resetDetail,
+    refreshDetail,
+    optimisticRegenerate,
+  } = useConversationDetail(activeId, updateConversationSummary);
 
   const {
     draftKey,
@@ -1444,12 +1497,16 @@ function ConversationsPageInner() {
   const handleRegenerate = React.useCallback(
     async (messageId: string) => {
       if (!activeId) return;
-      await api.post<{ status: string }>(`conversations/${activeId}/regenerate`, {
-        messageId,
-      });
-      await refreshDetail({ reportError: false });
+      optimisticRegenerate(messageId);
+      try {
+        await api.post<{ status: string }>(`conversations/${activeId}/regenerate`, {
+          messageId,
+        });
+      } finally {
+        await refreshDetail({ reportError: false });
+      }
     },
-    [activeId, refreshDetail],
+    [activeId, optimisticRegenerate, refreshDetail],
   );
 
   const handleSelectBranch = React.useCallback(
