@@ -696,6 +696,50 @@ function applyOptimisticRegenerate(
   };
 }
 
+function applyOptimisticEditMessage(
+  conversation: ConversationDto,
+  messageId: string,
+  parts: UIMessagePart[],
+): ConversationDto {
+  const targetIndex = conversation.messages.findIndex((node) =>
+    node.messages.some((message) => message.id === messageId),
+  );
+
+  if (targetIndex < 0) {
+    return conversation;
+  }
+
+  const targetNode = conversation.messages[targetIndex];
+  const targetMessageIndex = targetNode.messages.findIndex((message) => message.id === messageId);
+  const targetMessage = targetNode.messages[targetMessageIndex];
+
+  if (!targetMessage) {
+    return conversation;
+  }
+
+  const nextMessages = [...targetNode.messages];
+  nextMessages[targetMessageIndex] = {
+    ...targetMessage,
+    parts,
+  };
+
+  const nextNode = {
+    ...targetNode,
+    messages: nextMessages,
+    selectIndex: targetMessageIndex,
+  };
+  const nextNodes = conversation.messages.slice(0, targetIndex + 1);
+  nextNodes[targetIndex] = nextNode;
+
+  return {
+    ...conversation,
+    messages: nextNodes,
+    isGenerating:
+      targetMessage.role.toUpperCase() === "USER" ? true : conversation.isGenerating,
+    updateAt: conversation.updateAt + 1,
+  };
+}
+
 function useConversationDetail(activeId: string | null, updateSummary: ConversationSummaryUpdater) {
   const { t } = useTranslation("page");
   const [detail, setDetail] = React.useState<ConversationDto | null>(null);
@@ -810,6 +854,21 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       if (!currentDetail) return;
 
       const nextDetail = applyOptimisticRegenerate(currentDetail, messageId);
+      if (nextDetail === currentDetail) return;
+
+      detailRef.current = nextDetail;
+      setDetail(nextDetail);
+      updateSummary(toConversationSummaryUpdate(nextDetail));
+    },
+    [updateSummary],
+  );
+
+  const optimisticEditMessage = React.useCallback(
+    (messageId: string, parts: UIMessagePart[]) => {
+      const currentDetail = detailRef.current;
+      if (!currentDetail) return;
+
+      const nextDetail = applyOptimisticEditMessage(currentDetail, messageId, parts);
       if (nextDetail === currentDetail) return;
 
       detailRef.current = nextDetail;
@@ -967,6 +1026,7 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     resetDetail,
     refreshDetail,
     optimisticRegenerate,
+    optimisticEditMessage,
   };
 }
 
@@ -1304,6 +1364,7 @@ function ConversationsPageInner() {
     resetDetail,
     refreshDetail,
     optimisticRegenerate,
+    optimisticEditMessage,
   } = useConversationDetail(activeId, updateConversationSummary);
 
   const {
@@ -1633,15 +1694,21 @@ function ConversationsPageInner() {
     if (draftParts.length === 0) return;
 
     const nextParts = buildEditedParts(editingSession, draftParts);
+    const strippedParts = stripEditDraftMetadata(nextParts);
 
-    await api.post<{ status: string }>(
-      `conversations/${activeId}/messages/${editingSession.messageId}/edit`,
-      { parts: stripEditDraftMetadata(nextParts) },
-    );
+    optimisticEditMessage(editingSession.messageId, strippedParts);
 
-    setEditingSession(null);
-    clearCurrentDraft();
-    await refreshDetail({ reportError: false });
+    try {
+      await api.post<{ status: string }>(
+        `conversations/${activeId}/messages/${editingSession.messageId}/edit`,
+        { parts: strippedParts },
+      );
+
+      setEditingSession(null);
+      clearCurrentDraft();
+    } finally {
+      await refreshDetail({ reportError: false });
+    }
   }, [
     activeId,
     clearCurrentDraft,
@@ -1649,6 +1716,7 @@ function ConversationsPageInner() {
     editingSession,
     getCurrentSubmitParts,
     handleSubmit,
+    optimisticEditMessage,
     quotedMessage,
     refreshDetail,
     settings,

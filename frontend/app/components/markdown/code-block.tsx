@@ -14,6 +14,7 @@ import {
 
 import { getCodePreviewLanguage } from "~/components/workbench/code-preview-language";
 import { Button } from "~/components/ui/button";
+import { copyTextToClipboard } from "~/lib/clipboard";
 import {
   Select,
   SelectContent,
@@ -495,7 +496,7 @@ export function CodeBlockCopyButton({
   const { code } = React.useContext(CodeBlockContext);
 
   const copyToClipboard = React.useCallback(async () => {
-    if (typeof window === "undefined" || !navigator?.clipboard?.writeText) {
+    if (typeof window === "undefined") {
       onError?.(new Error(t("code_block.clipboard_not_available")));
       return;
     }
@@ -505,7 +506,7 @@ export function CodeBlockCopyButton({
     }
 
     try {
-      await navigator.clipboard.writeText(code);
+      await copyTextToClipboard(code);
       setIsCopied(true);
       onCopy?.();
       timeoutRef.current = window.setTimeout(() => {

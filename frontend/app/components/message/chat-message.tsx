@@ -29,6 +29,7 @@ import type {
 } from "~/types";
 
 import { cn } from "~/lib/utils";
+import { copyTextToClipboard } from "~/lib/clipboard";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -211,8 +212,8 @@ const ChatMessageActionsRow = React.memo(({
 
   const handleCopy = React.useCallback(async () => {
     const text = buildCopyText(message.parts);
-    if (!text || typeof navigator === "undefined" || !navigator.clipboard) return;
-    await navigator.clipboard.writeText(text);
+    if (!text) return;
+    await copyTextToClipboard(text);
   }, [message.parts]);
 
   const handleRegenerate = React.useCallback(async () => {

@@ -95,7 +95,8 @@ pub async fn edit_message(
     }
     let mut conversation = db::get_conversation(state.config.db_path.clone(), account_id.clone(), conversation_id.clone()).await?;
     let mut edited_role = None;
-    for node in &mut conversation.messages {
+    let mut edited_index = None;
+    for (index, node) in conversation.messages.iter_mut().enumerate() {
         if let Some(original) = node.messages.iter().find(|message| message.id == message_id).cloned() {
             let mut edited = original.clone();
             edited.id = db::random_id();
@@ -105,12 +106,16 @@ pub async fn edit_message(
             node.messages.push(edited);
             node.select_index = node.messages.len() as i64 - 1;
             edited_role = Some(original.role);
+            edited_index = Some(index);
             break;
         }
     }
     let Some(role) = edited_role else {
         return Err(AppError::bad_request("Message not found"));
     };
+    if let Some(index) = edited_index {
+        conversation.messages.truncate(index + 1);
+    }
     conversation.update_at = db::now_millis();
     db::upsert_conversation(state.config.db_path.clone(), account_id.clone(), conversation.clone()).await?;
     emit_changed(&state, &account_id, &conversation);
