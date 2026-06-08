@@ -102,6 +102,8 @@
     "quick_message_default_title": "Quick Message",
     "upload_failed": "Upload failed",
     "send_failed": "Send failed",
+    "queue_failed": "Failed to queue message",
+    "queue_send": "Queue Send",
     "drop_to_upload": "Drop files here to upload",
     "editing_tip": "Editing message, sending will create a new branch",
     "cancel_edit": "Cancel Edit",

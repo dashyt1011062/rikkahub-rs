@@ -58,6 +58,7 @@ export interface ChatInputProps {
   shouldDeleteFileOnRemove?: (part: UIMessagePart) => boolean;
   onRemovePart: (index: number, part: UIMessagePart) => Promise<void> | void;
   onSend: (options?: ChatInputSendOptions) => Promise<void> | void;
+  onQueueSend?: (options?: ChatInputSendOptions) => Promise<void> | void;
   onStop?: () => Promise<void> | void;
   onCancelEdit?: () => void;
   onClearQuote?: () => void;
@@ -369,6 +370,7 @@ export function ChatInput({
   shouldDeleteFileOnRemove,
   onRemovePart,
   onSend,
+  onQueueSend,
   onStop,
   onCancelEdit,
   onClearQuote,
@@ -412,6 +414,7 @@ export function ChatInput({
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
+  const [queueing, setQueueing] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [uploadMenuOpen, setUploadMenuOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -426,9 +429,11 @@ export function ChatInput({
 
   const canStop = ready && Boolean(onStop) && isGenerating && !disabled;
   const canSend = ready && !isGenerating && !disabled && !isEmpty;
+  const canQueueSend = ready && Boolean(onQueueSend) && isGenerating && !disabled && !isEditing && !isEmpty && !uploading;
   const canUpload = ready && !disabled && !uploading;
   const canUseToolbarControls = ready && !disabled;
-  const actionDisabled = submitting || uploading || (!canStop && !canSend);
+  const actionDisabled = submitting || queueing || uploading || (!canStop && !canSend);
+  const queueDisabled = submitting || queueing || !canQueueSend;
   const {
     containerRef: toolbarScrollRef,
     handlePointerDown: handleToolbarPointerDown,
@@ -512,7 +517,29 @@ export function ChatInput({
     } finally {
       setSubmitting(false);
     }
-  }, [actionDisabled, canSend, canStop, onSend, onStop, t]);
+  }, [actionDisabled, canSend, canStop, imageGenerationMode, onSend, onStop, supportsImageGenerationMode, t]);
+
+  const handleQueueAction = React.useCallback(async () => {
+    if (queueDisabled) {
+      return;
+    }
+
+    setQueueing(true);
+    setError(null);
+
+    try {
+      await onQueueSend?.(
+        supportsImageGenerationMode
+          ? { imageGenerationMode }
+          : undefined,
+      );
+    } catch (queueError) {
+      const message = queueError instanceof Error ? queueError.message : t("chat.queue_failed");
+      setError(message);
+    } finally {
+      setQueueing(false);
+    }
+  }, [imageGenerationMode, onQueueSend, queueDisabled, supportsImageGenerationMode, t]);
 
   const handleTextChange = React.useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -922,27 +949,46 @@ export function ChatInput({
                 onSelect={handleQuickMessageSelect}
               />
             </div>
-            <Button
-              onClick={() => {
-                void handlePrimaryAction();
-              }}
-              disabled={actionDisabled}
-              size="icon"
-              className={cn(
-                "size-9 rounded-full shadow-sm",
-                isGenerating && !submitting
-                  ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90",
-              )}
-            >
-              {submitting || uploading ? (
-                <LoaderCircle className="size-4 animate-spin" />
-              ) : isGenerating ? (
-                <Square className="size-4" />
-              ) : (
-                <ArrowUp className="size-4" />
-              )}
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              {isGenerating && onQueueSend ? (
+                <Button
+                  onClick={() => {
+                    void handleQueueAction();
+                  }}
+                  disabled={queueDisabled}
+                  size="icon"
+                  title={t("chat.queue_send")}
+                  className="size-9 rounded-full bg-primary text-primary-foreground shadow-sm hover:bg-primary/90"
+                >
+                  {queueing ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <ArrowUp className="size-4" />
+                  )}
+                </Button>
+              ) : null}
+              <Button
+                onClick={() => {
+                  void handlePrimaryAction();
+                }}
+                disabled={actionDisabled}
+                size="icon"
+                className={cn(
+                  "size-9 rounded-full shadow-sm",
+                  isGenerating && !submitting
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90",
+                )}
+              >
+                {submitting || uploading ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : isGenerating ? (
+                  <Square className="size-4" />
+                ) : (
+                  <ArrowUp className="size-4" />
+                )}
+              </Button>
+            </div>
           </div>
         </div>
         <p className="mt-2 text-center text-xs text-muted-foreground">{sendHint}</p>

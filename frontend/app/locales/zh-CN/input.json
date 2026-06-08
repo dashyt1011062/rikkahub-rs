@@ -102,6 +102,8 @@
     "quick_message_default_title": "快捷消息",
     "upload_failed": "上传失败",
     "send_failed": "发送失败",
+    "queue_failed": "加入队列失败",
+    "queue_send": "排队发送",
     "drop_to_upload": "拖拽文件到这里上传",
     "editing_tip": "正在编辑消息，发送后会创建新分支",
     "cancel_edit": "取消编辑",

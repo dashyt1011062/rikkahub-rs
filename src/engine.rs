@@ -83,6 +83,35 @@ pub async fn send_message(
     Ok(())
 }
 
+pub async fn queue_message(
+    state: AppState,
+    account_id: String,
+    conversation_id: String,
+    parts: Vec<Value>,
+    image_generation_mode: Option<String>,
+) -> AppResult<bool> {
+    if parts.is_empty() {
+        return Err(AppError::bad_request("parts must not be empty"));
+    }
+    if !state.engine.is_generating(&account_id, &conversation_id).await {
+        send_message(state, account_id, conversation_id, parts, image_generation_mode).await?;
+        return Ok(false);
+    }
+    db::enqueue_pending_message(
+        state.config.db_path.clone(),
+        account_id.clone(),
+        conversation_id.clone(),
+        parts,
+        image_generation_mode,
+    )
+    .await?;
+    state.events.emit(AppEvent::ConversationChanged {
+        account_id,
+        conversation_id,
+    });
+    Ok(true)
+}
+
 pub async fn edit_message(
     state: AppState,
     account_id: String,
@@ -330,14 +359,49 @@ pub async fn start_generation(state: AppState, account_id: String, conversation_
         }
         task_state.engine.remove_job(&task_account, &task_conversation).await;
         task_state.events.emit(AppEvent::ConversationChanged {
-            account_id: task_account,
-            conversation_id: task_conversation,
+            account_id: task_account.clone(),
+            conversation_id: task_conversation.clone(),
         });
+        spawn_next_pending_message(task_state.clone(), task_account, task_conversation);
     });
     state.engine.insert_job(&account_id, &conversation_id, handle).await;
     state.events.emit(AppEvent::ConversationChanged {
         account_id,
         conversation_id,
+    });
+}
+
+fn spawn_next_pending_message(state: AppState, account_id: String, conversation_id: String) {
+    tokio::spawn(async move {
+        if state.engine.is_generating(&account_id, &conversation_id).await {
+            return;
+        }
+        let result = async {
+            let Some(pending) = db::pop_pending_message(
+                state.config.db_path.clone(),
+                account_id.clone(),
+                conversation_id.clone(),
+            )
+            .await? else {
+                return Ok(());
+            };
+            send_message(
+                state.clone(),
+                account_id.clone(),
+                conversation_id.clone(),
+                pending.parts,
+                pending.image_generation_mode,
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            state.events.emit(AppEvent::ConversationError {
+                account_id,
+                conversation_id,
+                message: error.message,
+            });
+        }
     });
 }
 

@@ -250,6 +250,16 @@ pub async fn send_message(
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": "accepted" }))))
 }
 
+pub async fn queue_message(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<SendMessageRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let queued = engine::queue_message(state, account.0, id, request.parts, request.image_generation_mode).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "status": if queued { "queued" } else { "accepted" } }))))
+}
+
 pub async fn edit_message(
     Extension(account): Extension<AccountId>,
     State(state): State<AppState>,

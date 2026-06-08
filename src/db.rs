@@ -119,6 +119,12 @@ pub struct UploadFilesResponseDto {
     pub files: Vec<UploadedFileDto>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PendingMessageRecord {
+    pub parts: Vec<Value>,
+    pub image_generation_mode: Option<String>,
+}
+
 pub async fn list_conversations(
     db_path: PathBuf,
     account_id: String,
@@ -496,16 +502,102 @@ pub async fn upsert_message_node(
     .map_err(|error| AppError::internal(format!("message node upsert task failed: {error}")))?
 }
 
+pub async fn enqueue_pending_message(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+    parts: Vec<Value>,
+    image_generation_mode: Option<String>,
+) -> AppResult<i64> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        ensure_pending_message_queue(&tx)?;
+        ensure_conversation_writable(&tx, &conversation_id, &account_id)?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM conversationentity WHERE id = ?1 AND account_id = ?2",
+                params![&conversation_id, &account_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(AppError::not_found("Conversation not found"));
+        }
+        tx.execute(
+            "INSERT INTO pending_message_queue (account_id, conversation_id, parts, image_generation_mode, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &account_id,
+                &conversation_id,
+                serde_json::to_string(&parts)?,
+                image_generation_mode,
+                now_millis(),
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok::<i64, AppError>(id)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("pending message enqueue task failed: {error}")))?
+}
+
+pub async fn pop_pending_message(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+) -> AppResult<Option<PendingMessageRecord>> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        ensure_pending_message_queue(&tx)?;
+        let pending = tx
+            .query_row(
+                "SELECT id, parts, image_generation_mode
+                 FROM pending_message_queue
+                 WHERE account_id = ?1 AND conversation_id = ?2
+                 ORDER BY id ASC
+                 LIMIT 1",
+                params![&account_id, &conversation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, parts_raw, image_generation_mode)) = pending else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        tx.execute("DELETE FROM pending_message_queue WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        let parts = serde_json::from_str::<Vec<Value>>(&parts_raw)?;
+        Ok(Some(PendingMessageRecord {
+            parts,
+            image_generation_mode,
+        }))
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("pending message pop task failed: {error}")))?
+}
+
 pub async fn delete_conversation(db_path: PathBuf, account_id: String, conversation_id: String) -> AppResult<bool> {
     task::spawn_blocking(move || {
         let mut conn = open_connection(&db_path)?;
         let tx = conn.transaction()?;
+        ensure_pending_message_queue(&tx)?;
         let deleted = tx.execute(
             "DELETE FROM conversationentity WHERE id = ?1 AND account_id = ?2",
-            params![conversation_id, account_id],
+            params![&conversation_id, &account_id],
         )? > 0;
         if deleted {
-            tx.execute("DELETE FROM message_fts WHERE conversation_id = ?1", params![conversation_id])?;
+            tx.execute("DELETE FROM message_fts WHERE conversation_id = ?1", params![&conversation_id])?;
+            tx.execute("DELETE FROM pending_message_queue WHERE conversation_id = ?1", params![&conversation_id])?;
         }
         tx.commit()?;
         Ok::<bool, AppError>(deleted)
@@ -807,6 +899,26 @@ fn ensure_conversation_writable(conn: &Connection, id: &str, account_id: &str) -
             return Err(AppError::forbidden("Conversation belongs to another account"));
         }
     }
+    Ok(())
+}
+
+fn ensure_pending_message_queue(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pending_message_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            parts TEXT NOT NULL,
+            image_generation_mode TEXT,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_message_queue_conversation
+         ON pending_message_queue(account_id, conversation_id, id)",
+        [],
+    )?;
     Ok(())
 }
 

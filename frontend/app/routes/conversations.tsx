@@ -1120,6 +1120,30 @@ function useDraftInputController({
     [activeId, clearDraft, draftKey, getSubmitParts, navigate, refreshDetail, refreshList, setHomeDraftId],
   );
 
+  const handleQueueSubmit = React.useCallback(
+    async (options?: {
+      partsOverride?: UIMessagePart[];
+      imageGenerationMode?: ChatInputSendOptions["imageGenerationMode"];
+    }) => {
+      if (!draftKey) return;
+
+      const parts = options?.partsOverride ?? getSubmitParts(draftKey);
+      if (parts.length === 0) return;
+
+      if (!activeId) {
+        await handleSubmit(options);
+        return;
+      }
+
+      await api.post<{ status: string }>(`conversations/${activeId}/messages/queue`, {
+        parts,
+        imageGenerationMode: options?.imageGenerationMode,
+      });
+      clearDraft(draftKey);
+    },
+    [activeId, clearDraft, draftKey, getSubmitParts, handleSubmit],
+  );
+
   const replaceDraft = React.useCallback(
     (text: string, parts: UIMessagePart[]) => {
       if (!draftKey) return;
@@ -1148,6 +1172,7 @@ function useDraftInputController({
     handleAddInputParts,
     handleRemoveInputPart,
     handleSubmit,
+    handleQueueSubmit,
     replaceDraft,
     clearCurrentDraft,
     getCurrentSubmitParts,
@@ -1375,6 +1400,7 @@ function ConversationsPageInner() {
     handleAddInputParts,
     handleRemoveInputPart,
     handleSubmit,
+    handleQueueSubmit,
     replaceDraft,
     clearCurrentDraft,
     getCurrentSubmitParts,
@@ -1723,6 +1749,51 @@ function ConversationsPageInner() {
     t,
   ]);
 
+  const handleQueueSend = React.useCallback(async (options?: ChatInputSendOptions) => {
+    if (!editingSession) {
+      const draftParts = getCurrentSubmitParts();
+
+      if (!quotedMessage) {
+        await handleQueueSubmit({ imageGenerationMode: options?.imageGenerationMode });
+        return;
+      }
+
+      const currentModelId = currentAssistant?.chatModelId ?? settings?.chatModelId ?? null;
+      const currentModel =
+        settings?.providers
+          .flatMap((provider) => provider.models)
+          .find((model) => model.id === currentModelId) ?? null;
+
+      if (isImageGenerationModel(currentModel)) {
+        const mergedParts = mergeQuotedAndCurrentParts(quotedMessage, draftParts);
+        const imageCount = getImageParts(mergedParts).length;
+        if (imageCount === 0) {
+          toast.error(t("conversations.quote.no_image"), { duration: 2000 });
+          return;
+        }
+
+        await handleQueueSubmit({
+          partsOverride: mergedParts,
+          imageGenerationMode: "new_image",
+        });
+      } else {
+        await handleQueueSubmit({
+          partsOverride: injectQuoteContextIntoDraftParts(quotedMessage, draftParts, t),
+        });
+      }
+
+      setQuotedMessage(null);
+    }
+  }, [
+    currentAssistant?.chatModelId,
+    editingSession,
+    getCurrentSubmitParts,
+    handleQueueSubmit,
+    quotedMessage,
+    settings,
+    t,
+  ]);
+
   const handleTogglePinConversation = React.useCallback(
     async (conversationId: string) => {
       await api.post<{ status: string }>(`conversations/${conversationId}/pin`);
@@ -1867,6 +1938,7 @@ function ConversationsPageInner() {
             handleRemoveInputPart(index);
           }}
           onSend={handleSend}
+          onQueueSend={activeId ? handleQueueSend : undefined}
           onStop={activeId ? handleStop : undefined}
         />
       </div>
