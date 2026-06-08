@@ -6,6 +6,7 @@ mod engine;
 mod error;
 mod events;
 mod file_storage;
+mod imghippo;
 mod imgpile;
 mod llm;
 mod mcp;
@@ -13,6 +14,7 @@ mod routes;
 mod settings_store;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
@@ -36,8 +38,20 @@ pub struct AppState {
     pub config: Arc<AppConfig>,
     pub http: Client,
     pub file_proxy_permits: Arc<Semaphore>,
+    pub imghippo_key_cursor: Arc<AtomicUsize>,
     pub events: EventHub,
     pub engine: EngineState,
+}
+
+impl AppState {
+    pub fn next_imghippo_key(&self) -> Option<String> {
+        let keys = &self.config.imghippo_keys;
+        if keys.is_empty() {
+            return None;
+        }
+        let index = self.imghippo_key_cursor.fetch_add(1, Ordering::Relaxed);
+        keys.get(index % keys.len()).cloned()
+    }
 }
 
 #[tokio::main]
@@ -55,6 +69,7 @@ async fn main() -> AppResult<()> {
             .build()
             .map_err(|error| error::AppError::internal(format!("failed to build http client: {error}")))?,
         file_proxy_permits: Arc::new(Semaphore::new(config.max_remote_file_proxies)),
+        imghippo_key_cursor: Arc::new(AtomicUsize::new(0)),
         events: EventHub::new(),
         engine: EngineState::default(),
     };

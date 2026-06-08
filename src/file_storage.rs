@@ -5,6 +5,7 @@ use bytes::Bytes;
 
 use crate::db::{self, ManagedFileRecord};
 use crate::error::{AppError, AppResult};
+use crate::imghippo;
 use crate::imgpile;
 use crate::AppState;
 
@@ -17,6 +18,10 @@ pub fn uses_imgpile_storage(storage: &str) -> bool {
     storage.trim().eq_ignore_ascii_case("imgpile")
 }
 
+pub fn uses_imghippo_storage(storage: &str) -> bool {
+    storage.trim().eq_ignore_ascii_case("imghippo")
+}
+
 pub async fn store_bytes(
     state: &AppState,
     account_id: String,
@@ -24,7 +29,39 @@ pub async fn store_bytes(
     mime_type: String,
     bytes: Bytes,
 ) -> AppResult<StoredFile> {
-    if uses_imgpile_storage(&state.config.file_storage) && mime_type.trim().to_ascii_lowercase().starts_with("image/") {
+    let is_image = mime_type.trim().to_ascii_lowercase().starts_with("image/");
+    if uses_imghippo_storage(&state.config.file_storage) && is_image {
+        let api_key = state
+            .next_imghippo_key()
+            .ok_or_else(|| AppError::bad_request("Imghippo storage is not configured"))?;
+        let upload = imghippo::upload_bytes(
+            state.http.clone(),
+            api_key,
+            bytes,
+            display_name.clone(),
+            mime_type.clone(),
+        )
+        .await?;
+        let record = db::insert_remote_file(
+            state.config.db_path.clone(),
+            account_id,
+            display_name,
+            mime_type,
+            upload.size_bytes,
+            "imghippo".to_string(),
+            upload.original_url.clone(),
+            upload.page_url,
+            upload.delete_url,
+            upload.thumbnail_url,
+        )
+        .await?;
+        return Ok(StoredFile {
+            record,
+            url: upload.original_url,
+        });
+    }
+
+    if uses_imgpile_storage(&state.config.file_storage) && is_image {
         let upload = imgpile::upload_bytes(
             state.http.clone(),
             state.config.imgpile_key.clone(),

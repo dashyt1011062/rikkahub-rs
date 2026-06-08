@@ -25,6 +25,7 @@ pub struct AppConfig {
     pub upload_max_bytes: u64,
     pub file_storage: String,
     pub imgpile_key: String,
+    pub imghippo_keys: Vec<String>,
     pub version: String,
     pub web_accounts: Vec<WebAccount>,
     pub max_remote_file_proxies: usize,
@@ -46,6 +47,10 @@ impl AppConfig {
         let upload_max_mb = env_value("UPLOAD_MAX_MB", "20").parse::<u64>().unwrap_or(20);
         let file_storage = env_value("FILE_STORAGE", "local");
         let imgpile_key = env_value("IMGPILE_KEY", &env_value("IMGPILE_TOKEN", ""));
+        let imghippo_keys = parse_secret_list(
+            &env_value("IMGHIPPO_KEYS", ""),
+            &env_value("IMGHIPPO_KEY", &env_value("IMGHIPPO_TOKEN", "")),
+        );
         let version = env_value("APP_VERSION", "rust-dev");
         let web_accounts = parse_web_accounts(&access_password, &env_value("WEB_ACCOUNTS", ""));
         let max_remote_file_proxies = env_value("MAX_REMOTE_FILE_PROXIES", "10")
@@ -68,6 +73,7 @@ impl AppConfig {
             upload_max_bytes: upload_max_mb.saturating_mul(1024 * 1024),
             file_storage,
             imgpile_key,
+            imghippo_keys,
             version,
             web_accounts,
             max_remote_file_proxies,
@@ -138,6 +144,22 @@ fn env_bool(key: &str, default: bool) -> bool {
         .ok()
         .map(|value| value.eq_ignore_ascii_case("true") || value == "1" || value.eq_ignore_ascii_case("yes"))
         .unwrap_or(default)
+}
+
+fn parse_secret_list(raw: &str, fallback: &str) -> Vec<String> {
+    let mut keys = raw
+        .split([',', ';', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        let fallback = fallback.trim();
+        if !fallback.is_empty() {
+            keys.push(fallback.to_string());
+        }
+    }
+    keys
 }
 
 fn parse_web_accounts(access_password: &str, raw: &str) -> Vec<WebAccount> {
