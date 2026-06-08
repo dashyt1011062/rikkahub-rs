@@ -66,11 +66,19 @@ export interface MessageNodeDto {
   selectIndex: number;
 }
 
+export interface PendingMessageDto {
+  id: number;
+  parts: UIMessagePart[];
+  imageGenerationMode?: string | null;
+  createdAt: number;
+}
+
 export interface ConversationDto {
   id: string;
   assistantId: string;
   title: string;
   messages: MessageNodeDto[];
+  pendingMessages: PendingMessageDto[];
   truncateIndex: number;
   chatSuggestions: string[];
   isPinned: boolean;
@@ -115,4 +123,3 @@ export interface FetchProviderModelsResponseDto {
   providerId: string;
   models: ProviderModelFetchDto[];
 }
-

@@ -37,6 +37,8 @@ pub struct ConversationDto {
     pub assistant_id: String,
     pub title: String,
     pub messages: Vec<MessageNodeDto>,
+    #[serde(default)]
+    pub pending_messages: Vec<PendingMessageDto>,
     pub truncate_index: i64,
     pub chat_suggestions: Vec<String>,
     pub is_pinned: bool,
@@ -51,6 +53,15 @@ pub struct MessageNodeDto {
     pub id: String,
     pub messages: Vec<MessageDto>,
     pub select_index: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMessageDto {
+    pub id: i64,
+    pub parts: Vec<Value>,
+    pub image_generation_mode: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -183,7 +194,7 @@ pub async fn get_conversation(db_path: PathBuf, account_id: String, conversation
              WHERE id = ?1 AND account_id = ?2",
         )?;
         let row = stmt
-            .query_row(params![conversation_id, account_id], |row| {
+            .query_row(params![&conversation_id, &account_id], |row| {
                 let suggestions_raw: String = row.get(4)?;
                 Ok(ConversationRow {
                     id: row.get(0)?,
@@ -215,12 +226,14 @@ pub async fn get_conversation(db_path: PathBuf, account_id: String, conversation
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let pending_messages = read_pending_messages(&conn, &account_id, &row.id)?;
 
         Ok(ConversationDto {
             id: row.id,
             assistant_id: row.assistant_id,
             title: row.title,
             messages: nodes,
+            pending_messages,
             truncate_index: row.truncate_index,
             chat_suggestions: row.suggestions,
             is_pinned: row.is_pinned,
@@ -372,6 +385,7 @@ pub async fn ensure_conversation(
                 assistant_id,
                 title: String::new(),
                 messages: Vec::new(),
+                pending_messages: Vec::new(),
                 truncate_index: -1,
                 chat_suggestions: Vec::new(),
                 is_pinned: false,
@@ -584,6 +598,28 @@ pub async fn pop_pending_message(
     })
     .await
     .map_err(|error| AppError::internal(format!("pending message pop task failed: {error}")))?
+}
+
+pub async fn delete_pending_message(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+    pending_id: i64,
+) -> AppResult<bool> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        ensure_pending_message_queue(&tx)?;
+        let deleted = tx.execute(
+            "DELETE FROM pending_message_queue
+             WHERE id = ?1 AND account_id = ?2 AND conversation_id = ?3",
+            params![pending_id, &account_id, &conversation_id],
+        )? > 0;
+        tx.commit()?;
+        Ok::<bool, AppError>(deleted)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("pending message delete task failed: {error}")))?
 }
 
 pub async fn delete_conversation(db_path: PathBuf, account_id: String, conversation_id: String) -> AppResult<bool> {
@@ -920,6 +956,47 @@ fn ensure_pending_message_queue(conn: &Connection) -> AppResult<()> {
         [],
     )?;
     Ok(())
+}
+
+fn read_pending_messages(conn: &Connection, account_id: &str, conversation_id: &str) -> AppResult<Vec<PendingMessageDto>> {
+    let table_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending_message_queue'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, parts, image_generation_mode, created_at
+         FROM pending_message_queue
+         WHERE account_id = ?1 AND conversation_id = ?2
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![account_id, conversation_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+
+    let mut pending_messages = Vec::new();
+    for row in rows {
+        let (id, parts_raw, image_generation_mode, created_at) = row?;
+        pending_messages.push(PendingMessageDto {
+            id,
+            parts: serde_json::from_str::<Vec<Value>>(&parts_raw)?,
+            image_generation_mode,
+            created_at,
+        });
+    }
+    Ok(pending_messages)
 }
 
 fn replace_message_search_index(conn: &Connection, conversation: &ConversationDto) -> AppResult<()> {

@@ -260,6 +260,15 @@ pub async fn queue_message(
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": if queued { "queued" } else { "accepted" } }))))
 }
 
+pub async fn delete_pending_message(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    Path((id, pending_id)): Path<(String, i64)>,
+) -> AppResult<Json<Value>> {
+    let deleted = engine::delete_pending_message(&state, account.0, id, pending_id).await?;
+    Ok(Json(json!({ "status": if deleted { "deleted" } else { "not_found" } })))
+}
+
 pub async fn edit_message(
     Extension(account): Extension<AccountId>,
     State(state): State<AppState>,

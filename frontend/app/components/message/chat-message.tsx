@@ -15,6 +15,7 @@ import {
   Quote,
   RefreshCw,
   Trash2,
+  X,
   Zap,
 } from "lucide-react";
 
@@ -23,6 +24,7 @@ import type {
   AssistantProfile,
   MessageDto,
   MessageNodeDto,
+  PendingMessageDto,
   ProviderModel,
   TokenUsage,
   UIMessagePart,
@@ -546,6 +548,62 @@ export const ChatMessage = React.memo(({
           onFork={onFork}
         />
       )}
+    </div>
+  );
+});
+
+interface PendingChatMessageProps {
+  pendingMessage: PendingMessageDto;
+  statusLabel: string;
+  cancelLabel: string;
+  onCancel?: (pendingId: number) => void | Promise<void>;
+}
+
+export const PendingChatMessage = React.memo(({
+  pendingMessage,
+  statusLabel,
+  cancelLabel,
+  onCancel,
+}: PendingChatMessageProps) => {
+  const [cancelling, setCancelling] = React.useState(false);
+
+  const handleCancel = React.useCallback(async () => {
+    if (!onCancel || cancelling) return;
+
+    setCancelling(true);
+    try {
+      await onCancel(pendingMessage.id);
+    } finally {
+      setCancelling(false);
+    }
+  }, [cancelling, onCancel, pendingMessage.id]);
+
+  return (
+    <div className="flex flex-col items-end gap-2 opacity-80">
+      <div className="flex w-full justify-end">
+        <div className="flex max-w-[85%] flex-col gap-2 rounded-lg border border-dashed border-muted-foreground/30 bg-muted/60 px-4 py-3 text-sm">
+          <MessageParts parts={pendingMessage.parts} />
+          <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
+            <Clock3 className="size-3.5" />
+            <span>{statusLabel}</span>
+            {onCancel ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-6 rounded-full text-muted-foreground hover:text-foreground"
+                disabled={cancelling}
+                title={cancelLabel}
+                onClick={() => {
+                  void handleCancel();
+                }}
+              >
+                <X className="size-3.5" />
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
     </div>
   );
 });

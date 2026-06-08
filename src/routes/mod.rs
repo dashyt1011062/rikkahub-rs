@@ -43,6 +43,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/conversations/:id/stream", get(conversation_routes::detail_stream))
         .route("/conversations/:id/messages", post(conversation_routes::send_message))
         .route("/conversations/:id/messages/queue", post(conversation_routes::queue_message))
+        .route("/conversations/:id/pending-messages/:pending_id", delete(conversation_routes::delete_pending_message))
         .route("/conversations/:id/regenerate", post(conversation_routes::regenerate))
         .route("/conversations/:id/regenerate-title", post(conversation_routes::regenerate_title))
         .route("/conversations/:id/title", post(conversation_routes::update_title))

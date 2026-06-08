@@ -112,6 +112,28 @@ pub async fn queue_message(
     Ok(true)
 }
 
+pub async fn delete_pending_message(
+    state: &AppState,
+    account_id: String,
+    conversation_id: String,
+    pending_id: i64,
+) -> AppResult<bool> {
+    let deleted = db::delete_pending_message(
+        state.config.db_path.clone(),
+        account_id.clone(),
+        conversation_id.clone(),
+        pending_id,
+    )
+    .await?;
+    if deleted {
+        state.events.emit(AppEvent::ConversationChanged {
+            account_id,
+            conversation_id,
+        });
+    }
+    Ok(deleted)
+}
+
 pub async fn edit_message(
     state: AppState,
     account_id: String,
@@ -261,6 +283,7 @@ pub async fn fork_conversation(
             format!("{} (Fork)", conversation.title)
         },
         messages: fork_nodes,
+        pending_messages: Vec::new(),
         truncate_index: conversation.truncate_index,
         chat_suggestions: conversation.chat_suggestions,
         is_pinned: false,

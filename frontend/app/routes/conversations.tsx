@@ -15,7 +15,7 @@ import {
   ConversationEmptyState,
 } from "~/components/extended/conversation";
 import { ChatInput, type ChatInputSendOptions } from "~/components/input/chat-input";
-import { ChatMessage } from "~/components/message/chat-message";
+import { ChatMessage, PendingChatMessage } from "~/components/message/chat-message";
 import { Drawer, DrawerContent } from "~/components/ui/drawer";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "~/components/ui/resizable";
 import { TypingIndicator } from "~/components/ui/typing-indicator";
@@ -37,6 +37,7 @@ import {
   type ConversationDto,
   type MessageNodeDto,
   type MessageDto,
+  type PendingMessageDto,
   type ConversationNodeUpdateEventDto,
   type ConversationErrorEventDto,
   type ConversationSnapshotEventDto,
@@ -1140,8 +1141,9 @@ function useDraftInputController({
         imageGenerationMode: options?.imageGenerationMode,
       });
       clearDraft(draftKey);
+      await refreshDetail({ reportError: false });
     },
-    [activeId, clearDraft, draftKey, getSubmitParts, handleSubmit],
+    [activeId, clearDraft, draftKey, getSubmitParts, handleSubmit, refreshDetail],
   );
 
   const replaceDraft = React.useCallback(
@@ -1185,6 +1187,7 @@ const ConversationTimeline = React.memo(({
   detailLoading,
   detailError,
   selectedNodeMessages,
+  pendingMessages,
   isGenerating,
   settings,
   conversationAssistantId,
@@ -1194,6 +1197,7 @@ const ConversationTimeline = React.memo(({
   onQuote,
   onFork,
   onRegenerate,
+  onCancelPending,
   onSelectBranch,
   onToolApproval,
 }: {
@@ -1202,6 +1206,7 @@ const ConversationTimeline = React.memo(({
   detailLoading: boolean;
   detailError: string | null;
   selectedNodeMessages: SelectedNodeMessage[];
+  pendingMessages: PendingMessageDto[];
   isGenerating: boolean;
   settings: Settings | null;
   conversationAssistantId: string | null;
@@ -1211,6 +1216,7 @@ const ConversationTimeline = React.memo(({
   onQuote: (message: MessageDto) => void | Promise<void>;
   onFork: (messageId: string) => Promise<void>;
   onRegenerate: (messageId: string) => Promise<void>;
+  onCancelPending: (pendingId: number) => Promise<void>;
   onSelectBranch: (nodeId: string, selectIndex: number) => Promise<void>;
   onToolApproval: (toolCallId: string, approved: boolean, reason: string) => Promise<void>;
 }) => {
@@ -1275,7 +1281,11 @@ const ConversationTimeline = React.memo(({
             description={detailError}
           />
         )}
-        {!detailLoading && !detailError && activeId && selectedNodeMessages.length === 0 && (
+        {!detailLoading &&
+          !detailError &&
+          activeId &&
+          selectedNodeMessages.length === 0 &&
+          pendingMessages.length === 0 && (
           <ConversationEmptyState
             icon={<MessageSquare className="size-10" />}
             title={t("conversations.empty_state.no_message_title")}
@@ -1324,6 +1334,18 @@ const ConversationTimeline = React.memo(({
             <TypingIndicator className="px-1 py-2" />
           </div>
         )}
+        {!detailLoading &&
+          !detailError &&
+          activeId &&
+          pendingMessages.map((pendingMessage) => (
+            <PendingChatMessage
+              key={pendingMessage.id}
+              pendingMessage={pendingMessage}
+              statusLabel={t("conversations.pending.status")}
+              cancelLabel={t("conversations.pending.cancel")}
+              onCancel={onCancelPending}
+            />
+          ))}
       </ConversationContent>
 
       {canQuickJump ? (
@@ -1869,6 +1891,20 @@ function ConversationsPageInner() {
     await refreshDetail({ reportError: false });
   }, [activeId, refreshDetail]);
 
+  const handleCancelPendingMessage = React.useCallback(async (pendingId: number) => {
+    if (!activeId) return;
+
+    try {
+      await api.delete<{ status: string }>(
+        `conversations/${activeId}/pending-messages/${pendingId}`,
+      );
+      await refreshDetail({ reportError: false });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("conversations.pending.cancel_failed");
+      toast.error(message, { duration: 2000 });
+    }
+  }, [activeId, refreshDetail, t]);
+
   const hasWorkbenchPanel = Boolean(panel);
   const workbenchPanelRef = React.useRef<PanelImperativeHandle | null>(null);
 
@@ -1897,6 +1933,7 @@ function ConversationsPageInner() {
             detailLoading={detailLoading}
             detailError={detailError}
             selectedNodeMessages={selectedNodeMessages}
+            pendingMessages={detail?.pendingMessages ?? []}
             isGenerating={detail?.isGenerating ?? false}
             settings={settings}
             conversationAssistantId={detail?.assistantId ?? null}
@@ -1905,6 +1942,7 @@ function ConversationsPageInner() {
             onQuote={handleQuoteMessage}
             onFork={handleForkMessage}
             onRegenerate={handleRegenerate}
+            onCancelPending={handleCancelPendingMessage}
             onSelectBranch={handleSelectBranch}
             onToolApproval={handleToolApproval}
           />

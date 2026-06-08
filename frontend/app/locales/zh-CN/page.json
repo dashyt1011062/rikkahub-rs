@@ -18,6 +18,11 @@
     "errors": {
       "load_detail_failed": "加载会话详情失败"
     },
+    "pending": {
+      "status": "排队中",
+      "cancel": "取消排队",
+      "cancel_failed": "取消排队失败"
+    },
     "quote": {
       "no_image": "引用消息和当前消息里都没有可用于生图的图片",
       "context_header": "[引用{{role}}消息]",
