@@ -346,6 +346,7 @@ async fn run_generation(state: AppState, account_id: String, conversation_id: St
     let mut conversation = db::get_conversation(state.config.db_path.clone(), account_id.clone(), conversation_id.clone()).await?;
 
     for _ in 0..MAX_TOOL_ROUNDS {
+        let assistant_insert_index = conversation.messages.len() as i64;
         let stream_node_id = Arc::new(Mutex::new(None::<String>));
 
         let result = llm::generate_reply_streaming(&state, &account_id, &settings, &conversation, |partial| {
@@ -360,6 +361,7 @@ async fn run_generation(state: AppState, account_id: String, conversation_id: St
                     &account_id,
                     &conversation_id,
                     &mut *guard,
+                    assistant_insert_index,
                     partial,
                     false,
                 )
@@ -375,6 +377,7 @@ async fn run_generation(state: AppState, account_id: String, conversation_id: St
             &account_id,
             &conversation_id,
             &mut *stream_node_id,
+            assistant_insert_index,
             result,
             true,
         )
@@ -398,10 +401,11 @@ async fn upsert_assistant_message(
     account_id: &str,
     conversation_id: &str,
     stream_node_id: &mut Option<String>,
+    insert_index: i64,
     result: llm::AssistantGenerationResult,
     finished: bool,
 ) -> AppResult<ConversationDto> {
-    let mut conversation = db::get_conversation(
+    let conversation = db::get_conversation(
         state.config.db_path.clone(),
         account_id.to_string(),
         conversation_id.to_string(),
@@ -413,20 +417,20 @@ async fn upsert_assistant_message(
         result.parts
     };
     let now = db::now_millis();
-    if stream_node_id.is_none() {
+    let node = if stream_node_id.is_none() {
         let node_id = db::random_id();
         let mut message = db::new_message("ASSISTANT", parts, result.model_id, finished);
         if finished {
             message.usage = llm::normalize_usage(result.usage);
         }
-        conversation.messages.push(MessageNodeDto {
+        *stream_node_id = Some(node_id.clone());
+        MessageNodeDto {
             id: node_id.clone(),
             messages: vec![message],
             select_index: 0,
-        });
-        *stream_node_id = Some(node_id);
+        }
     } else if let Some(node_id) = stream_node_id.as_ref() {
-        if let Some(node) = conversation.messages.iter_mut().find(|node| &node.id == node_id) {
+        if let Some(node) = conversation.messages.iter().find(|node| &node.id == node_id) {
             let mut message = node
                 .messages
                 .get(node.select_index.max(0) as usize)
@@ -438,12 +442,40 @@ async fn upsert_assistant_message(
                 message.usage = llm::normalize_usage(result.usage);
             }
             message.model_id = result.model_id.or(message.model_id);
-            node.messages = vec![message];
-            node.select_index = 0;
+            MessageNodeDto {
+                id: node.id.clone(),
+                messages: vec![message],
+                select_index: 0,
+            }
+        } else {
+            let mut message = db::new_message("ASSISTANT", parts, result.model_id, finished);
+            if finished {
+                message.usage = llm::normalize_usage(result.usage);
+            }
+            MessageNodeDto {
+                id: node_id.clone(),
+                messages: vec![message],
+                select_index: 0,
+            }
         }
-    }
-    conversation.update_at = now;
-    db::upsert_conversation(state.config.db_path.clone(), account_id.to_string(), conversation.clone()).await?;
+    } else {
+        unreachable!("stream_node_id checked above")
+    };
+    db::upsert_message_node(
+        state.config.db_path.clone(),
+        account_id.to_string(),
+        conversation_id.to_string(),
+        node,
+        insert_index,
+        now,
+    )
+    .await?;
+    let conversation = db::get_conversation(
+        state.config.db_path.clone(),
+        account_id.to_string(),
+        conversation_id.to_string(),
+    )
+    .await?;
     emit_changed(state, account_id, &conversation);
     Ok(conversation)
 }

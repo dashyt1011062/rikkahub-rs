@@ -434,6 +434,68 @@ pub async fn upsert_conversation(db_path: PathBuf, account_id: String, conversat
     .map_err(|error| AppError::internal(format!("conversation upsert task failed: {error}")))?
 }
 
+pub async fn upsert_message_node(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+    node: MessageNodeDto,
+    insert_index: i64,
+    update_at: i64,
+) -> AppResult<()> {
+    task::spawn_blocking(move || {
+        let mut conn = open_connection(&db_path)?;
+        let tx = conn.transaction()?;
+        ensure_conversation_writable(&tx, &conversation_id, &account_id)?;
+
+        let title = tx
+            .query_row(
+                "SELECT title FROM conversationentity WHERE id = ?1 AND account_id = ?2",
+                params![&conversation_id, &account_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::not_found("Conversation not found"))?;
+        tx.execute(
+            "UPDATE conversationentity SET update_at = ?1 WHERE id = ?2 AND account_id = ?3",
+            params![update_at, &conversation_id, &account_id],
+        )?;
+
+        let messages = serde_json::to_string(&node.messages)?;
+        let updated = tx.execute(
+            "UPDATE message_node
+             SET messages = ?1, select_index = ?2
+             WHERE id = ?3 AND conversation_id = ?4",
+            params![&messages, node.select_index, &node.id, &conversation_id],
+        )? > 0;
+
+        if !updated {
+            let node_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM message_node WHERE conversation_id = ?1",
+                params![&conversation_id],
+                |row| row.get(0),
+            )?;
+            let index = insert_index.clamp(0, node_count);
+            tx.execute(
+                "UPDATE message_node
+                 SET node_index = node_index + 1
+                 WHERE conversation_id = ?1 AND node_index >= ?2",
+                params![&conversation_id, index],
+            )?;
+            tx.execute(
+                "INSERT INTO message_node (id, conversation_id, node_index, messages, select_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![&node.id, &conversation_id, index, &messages, node.select_index],
+            )?;
+        }
+
+        replace_node_search_index(&tx, &conversation_id, &title, update_at, &node)?;
+        tx.commit()?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("message node upsert task failed: {error}")))?
+}
+
 pub async fn delete_conversation(db_path: PathBuf, account_id: String, conversation_id: String) -> AppResult<bool> {
     task::spawn_blocking(move || {
         let mut conn = open_connection(&db_path)?;
@@ -772,6 +834,31 @@ fn replace_message_search_index(conn: &Connection, conversation: &ConversationDt
                 conversation.update_at,
             ])?;
         }
+    }
+    Ok(())
+}
+
+fn replace_node_search_index(
+    conn: &Connection,
+    conversation_id: &str,
+    title: &str,
+    update_at: i64,
+    node: &MessageNodeDto,
+) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM message_fts WHERE conversation_id = ?1 AND node_id = ?2",
+        params![conversation_id, node.id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO message_fts(text, node_id, message_id, conversation_id, title, update_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for message in &node.messages {
+        let text = build_search_text(title, message);
+        if text.trim().is_empty() {
+            continue;
+        }
+        stmt.execute(params![text, node.id, message.id, conversation_id, title, update_at])?;
     }
     Ok(())
 }
