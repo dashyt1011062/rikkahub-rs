@@ -141,6 +141,27 @@ type ConversationListItem =
   | { type: "date-header"; date: string; label: string }
   | { type: "item"; conversation: ConversationListDto };
 
+function scrollConversationRowToSidebarTop(conversationId: string) {
+  const scrollContainer = document.getElementById("conversationScrollTarget");
+  if (!scrollContainer) return;
+
+  const activeRow = scrollContainer.querySelector<HTMLElement>(
+    `[data-conversation-id="${CSS.escape(conversationId)}"]`,
+  );
+  if (!activeRow) return;
+
+  const containerRect = scrollContainer.getBoundingClientRect();
+  const rowRect = activeRow.getBoundingClientRect();
+  const isVisible = rowRect.top >= containerRect.top && rowRect.bottom <= containerRect.bottom;
+  if (isVisible) return;
+
+  const targetTop = scrollContainer.scrollTop + rowRect.top - containerRect.top;
+  scrollContainer.scrollTo({
+    top: Math.max(0, targetTop),
+    behavior: "smooth",
+  });
+}
+
 function getDateLabel(date: dayjs.Dayjs, t: TFunction): string {
   const today = dayjs().startOf("day");
   const yesterday = today.subtract(1, "day");
@@ -722,11 +743,7 @@ export function ConversationSidebar({
     if (!activeId || typeof document === "undefined") return;
 
     const timer = window.setTimeout(() => {
-      const scrollContainer = document.getElementById("conversationScrollTarget");
-      const activeRow = scrollContainer?.querySelector<HTMLElement>(
-        `[data-conversation-id="${CSS.escape(activeId)}"]`,
-      );
-      activeRow?.scrollIntoView({ block: "nearest" });
+      scrollConversationRowToSidebarTop(activeId);
     }, 80);
 
     return () => {
@@ -1138,7 +1155,6 @@ export function ConversationSidebar({
     </Sidebar>
   );
 }
-
 
 
 
