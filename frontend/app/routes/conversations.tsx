@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import {
   ConversationScrollControls,
@@ -77,6 +77,7 @@ interface SelectedNodeMessage {
 
 interface TimelineMessageItem {
   id: string;
+  anchorMessageIds: string[];
   node: MessageNodeDto;
   message: MessageDto;
   deleteMessageIds?: string[];
@@ -84,6 +85,11 @@ interface TimelineMessageItem {
   forkMessageId?: string;
   disableEdit?: boolean;
   disableBranchSwitch?: boolean;
+}
+
+interface ConversationSelectTarget {
+  messageId?: string | null;
+  nodeId?: string | null;
 }
 
 interface TimelineMessageCacheEntry {
@@ -509,6 +515,7 @@ function buildGroupedTimelineItem(group: SelectedNodeMessage[]): TimelineMessage
   if (group.length === 1) {
     return {
       id: first.message.id,
+      anchorMessageIds: [first.message.id],
       node: first.node,
       message: first.message,
     };
@@ -526,6 +533,7 @@ function buildGroupedTimelineItem(group: SelectedNodeMessage[]): TimelineMessage
 
   return {
     id: first.message.id,
+    anchorMessageIds: group.map((item) => item.message.id),
     node: last.node,
     message: mergedMessage,
     deleteMessageIds: group.map((item) => item.message.id),
@@ -1188,6 +1196,7 @@ const ConversationTimeline = React.memo(({
   detailError,
   selectedNodeMessages,
   pendingMessages,
+  scrollTarget,
   isGenerating,
   settings,
   conversationAssistantId,
@@ -1198,6 +1207,7 @@ const ConversationTimeline = React.memo(({
   onFork,
   onRegenerate,
   onCancelPending,
+  onScrollTargetHandled,
   onSelectBranch,
   onToolApproval,
 }: {
@@ -1207,6 +1217,7 @@ const ConversationTimeline = React.memo(({
   detailError: string | null;
   selectedNodeMessages: SelectedNodeMessage[];
   pendingMessages: PendingMessageDto[];
+  scrollTarget: ConversationSelectTarget | null;
   isGenerating: boolean;
   settings: Settings | null;
   conversationAssistantId: string | null;
@@ -1217,6 +1228,7 @@ const ConversationTimeline = React.memo(({
   onFork: (messageId: string) => Promise<void>;
   onRegenerate: (messageId: string) => Promise<void>;
   onCancelPending: (pendingId: number) => Promise<void>;
+  onScrollTargetHandled: () => void;
   onSelectBranch: (nodeId: string, selectIndex: number) => Promise<void>;
   onToolApproval: (toolCallId: string, approved: boolean, reason: string) => Promise<void>;
 }) => {
@@ -1256,6 +1268,42 @@ const ConversationTimeline = React.memo(({
 
     return map;
   }, [settings]);
+
+  React.useEffect(() => {
+    if (!scrollTarget || detailLoading || detailError || timelineItems.length === 0) {
+      return;
+    }
+
+    const targetMessageId = scrollTarget.messageId?.trim();
+    const targetNodeId = scrollTarget.nodeId?.trim();
+    let targetElement: HTMLElement | null = null;
+
+    if (targetMessageId) {
+      targetElement = document.getElementById(getConversationMessageAnchorId(targetMessageId));
+    }
+
+    if (!targetElement) {
+      const anchors = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-conversation-message-anchor='true']"),
+      );
+      targetElement =
+        anchors.find((anchor) => {
+          const messageIds = anchor.dataset.messageIds?.split(" ") ?? [];
+          return Boolean(targetMessageId && messageIds.includes(targetMessageId));
+        }) ??
+        anchors.find((anchor) => Boolean(targetNodeId && anchor.dataset.nodeId === targetNodeId)) ??
+        null;
+    }
+
+    if (!targetElement) {
+      return;
+    }
+
+    window.setTimeout(() => {
+      targetElement?.scrollIntoView({ behavior: "smooth", block: "start" });
+      onScrollTargetHandled();
+    }, 80);
+  }, [detailError, detailLoading, onScrollTargetHandled, scrollTarget, timelineItems]);
 
   return (
     <Conversation className="flex-1 min-h-0">
@@ -1303,6 +1351,9 @@ const ConversationTimeline = React.memo(({
               <div
                 key={item.id}
                 id={getConversationMessageAnchorId(item.id)}
+                data-conversation-message-anchor="true"
+                data-message-ids={item.anchorMessageIds.join(" ")}
+                data-node-id={node.id}
                 className="scroll-mt-24"
               >
                 <ChatMessage
@@ -1381,6 +1432,7 @@ function ConversationsPageInner() {
   const { t } = useTranslation("page");
   const confirm = useConfirm();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { id: routeId } = useParams();
   const isHomeRoute = !routeId;
   const isMobile = useIsMobile();
@@ -1449,16 +1501,42 @@ function ConversationsPageInner() {
   const isNewChat = isHomeRoute && !activeId;
   const showSuggestions =
     Boolean(activeId) && !detailLoading && !detailError && chatSuggestions.length > 0;
+  const scrollTarget = React.useMemo<ConversationSelectTarget | null>(() => {
+    const messageId = searchParams.get("messageId")?.trim() ?? "";
+    const nodeId = searchParams.get("nodeId")?.trim() ?? "";
+    if (!messageId && !nodeId) return null;
+    return {
+      messageId: messageId || null,
+      nodeId: nodeId || null,
+    };
+  }, [searchParams]);
 
   const handleSelect = React.useCallback(
-    (id: string) => {
+    (id: string, target?: ConversationSelectTarget) => {
       setActiveId(id);
-      if (routeId !== id) {
-        navigate(`/c/${id}`);
+      const nextParams = new URLSearchParams();
+      if (target?.messageId) {
+        nextParams.set("messageId", target.messageId);
+      }
+      if (target?.nodeId) {
+        nextParams.set("nodeId", target.nodeId);
+      }
+      const query = nextParams.toString();
+      const nextPath = query ? `/c/${id}?${query}` : `/c/${id}`;
+      if (routeId !== id || searchParams.toString() !== query) {
+        navigate(nextPath);
       }
     },
-    [navigate, routeId, setActiveId],
+    [navigate, routeId, searchParams, setActiveId],
   );
+
+  const handleScrollTargetHandled = React.useCallback(() => {
+    if (!scrollTarget) return;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("messageId");
+    nextParams.delete("nodeId");
+    setSearchParams(nextParams, { replace: true });
+  }, [scrollTarget, searchParams, setSearchParams]);
 
   React.useEffect(() => {
     setEditingSession(null);
@@ -1934,6 +2012,7 @@ function ConversationsPageInner() {
             detailError={detailError}
             selectedNodeMessages={selectedNodeMessages}
             pendingMessages={detail?.pendingMessages ?? []}
+            scrollTarget={scrollTarget}
             isGenerating={detail?.isGenerating ?? false}
             settings={settings}
             conversationAssistantId={detail?.assistantId ?? null}
@@ -1943,6 +2022,7 @@ function ConversationsPageInner() {
             onFork={handleForkMessage}
             onRegenerate={handleRegenerate}
             onCancelPending={handleCancelPendingMessage}
+            onScrollTargetHandled={handleScrollTargetHandled}
             onSelectBranch={handleSelectBranch}
             onToolApproval={handleToolApproval}
           />

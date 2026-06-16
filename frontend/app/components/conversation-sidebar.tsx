@@ -74,6 +74,11 @@ import { getAssistantDisplayName } from "~/lib/display";
 import { clearWebAuthToken } from "~/services/api";
 import type { AssistantAvatar, AssistantProfile, AssistantTag, ConversationListDto } from "~/types";
 
+export interface ConversationSelectTarget {
+  messageId?: string | null;
+  nodeId?: string | null;
+}
+
 const THEME_OPTIONS: Array<{
   value: Theme;
   labelKey: string;
@@ -194,7 +199,7 @@ export interface ConversationSidebarProps {
   assistants: AssistantProfile[];
   assistantTags: AssistantTag[];
   currentAssistantId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, target?: ConversationSelectTarget) => void;
   onAssistantChange: (assistantId: string) => Promise<void>;
   onCreateAssistant?: () => Promise<void> | void;
   onEditAssistant?: (assistantId: string) => Promise<void> | void;
@@ -1116,7 +1121,6 @@ export function ConversationSidebar({
     </Sidebar>
   );
 }
-
 
 
 

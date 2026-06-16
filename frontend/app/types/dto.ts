@@ -38,6 +38,8 @@ export interface ConversationListInvalidateEventDto {
 
 export interface ConversationSearchResultDto {
   conversationId: string;
+  nodeId?: string | null;
+  messageId?: string | null;
   title: string;
   updateAt: number;
   isPinned: boolean;

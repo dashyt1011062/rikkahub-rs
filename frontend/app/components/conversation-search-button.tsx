@@ -19,7 +19,7 @@ import type { ConversationSearchResultDto } from "~/types";
 const SEARCH_PAGE_SIZE = 50;
 
 export interface ConversationSearchButtonProps {
-  onSelect: (id: string) => void;
+  onSelect: (id: string, target?: { messageId?: string | null; nodeId?: string | null }) => void;
 }
 
 export function ConversationSearchButton({ onSelect }: ConversationSearchButtonProps) {
@@ -138,7 +138,10 @@ export function ConversationSearchButton({ onSelect }: ConversationSearchButtonP
                     type="button"
                     className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted"
                     onClick={() => {
-                      onSelect(item.conversationId);
+                      onSelect(item.conversationId, {
+                        messageId: item.messageId,
+                        nodeId: item.nodeId,
+                      });
                       setOpen(false);
                     }}
                   >

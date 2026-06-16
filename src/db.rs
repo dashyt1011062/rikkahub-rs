@@ -97,6 +97,10 @@ pub struct MessageSearchResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSearchResultDto {
     pub conversation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub title: String,
     pub update_at: i64,
     pub is_pinned: bool,
@@ -310,6 +314,12 @@ pub async fn search_conversations(
                 Some(existing) => {
                     if existing.snippet.trim().is_empty() || existing.snippet == existing.title {
                         existing.snippet = item.snippet;
+                    }
+                    if existing.node_id.is_none() {
+                        existing.node_id = item.node_id;
+                    }
+                    if existing.message_id.is_none() {
+                        existing.message_id = item.message_id;
                     }
                     existing.update_at = existing.update_at.max(item.update_at);
                     existing.is_pinned = existing.is_pinned || item.is_pinned;
@@ -1158,6 +1168,8 @@ fn search_conversation_titles(
         let title: String = row.get(1)?;
         Ok(ConversationSearchResultDto {
             conversation_id: row.get(0)?,
+            node_id: None,
+            message_id: None,
             snippet: title.clone(),
             title,
             update_at: row.get(2)?,
@@ -1175,7 +1187,7 @@ fn search_conversation_content(
     limit: i64,
 ) -> rusqlite::Result<Vec<ConversationSearchResultDto>> {
     let mut stmt = conn.prepare(
-        "SELECT f.conversation_id, c.title, c.update_at, c.is_pinned,
+        "SELECT f.conversation_id, f.node_id, f.message_id, c.title, c.update_at, c.is_pinned,
                 snippet(message_fts, 0, '', '', '...', 12)
          FROM message_fts f
          JOIN conversationentity c ON c.id = f.conversation_id
@@ -1186,10 +1198,12 @@ fn search_conversation_content(
     let rows = stmt.query_map(params![query, account_id, assistant_id, limit], |row| {
         Ok(ConversationSearchResultDto {
             conversation_id: row.get(0)?,
-            title: row.get(1)?,
-            update_at: row.get(2)?,
-            is_pinned: row.get::<_, i64>(3)? != 0,
-            snippet: row.get(4)?,
+            node_id: Some(row.get(1)?),
+            message_id: Some(row.get(2)?),
+            title: row.get(3)?,
+            update_at: row.get(4)?,
+            is_pinned: row.get::<_, i64>(5)? != 0,
+            snippet: row.get(6)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>()
@@ -1204,7 +1218,7 @@ fn search_conversation_content_like(
 ) -> rusqlite::Result<Vec<ConversationSearchResultDto>> {
     let keyword = format!("%{query}%");
     let mut stmt = conn.prepare(
-        "SELECT n.messages, n.conversation_id, c.title, c.update_at, c.is_pinned
+        "SELECT n.id, n.messages, n.conversation_id, c.title, c.update_at, c.is_pinned
          FROM message_node n
          JOIN conversationentity c ON c.id = n.conversation_id
          WHERE c.account_id = ?1 AND c.assistant_id = ?2 AND n.messages LIKE ?3
@@ -1212,12 +1226,14 @@ fn search_conversation_content_like(
          LIMIT ?4",
     )?;
     let rows = stmt.query_map(params![account_id, assistant_id, keyword, limit], |row| {
-        let messages_raw: String = row.get(0)?;
+        let messages_raw: String = row.get(1)?;
         Ok(ConversationSearchResultDto {
-            conversation_id: row.get(1)?,
-            title: row.get(2)?,
-            update_at: row.get(3)?,
-            is_pinned: row.get::<_, i64>(4)? != 0,
+            node_id: Some(row.get(0)?),
+            message_id: None,
+            conversation_id: row.get(2)?,
+            title: row.get(3)?,
+            update_at: row.get(4)?,
+            is_pinned: row.get::<_, i64>(5)? != 0,
             snippet: make_snippet(&messages_raw, query),
         })
     })?;
