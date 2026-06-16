@@ -274,10 +274,11 @@ const ConversationListRow = React.memo(({
     [t],
   );
   return (
-    <SidebarMenuItem>
+    <SidebarMenuItem data-conversation-id={conversation.id}>
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <SidebarMenuButton
           isActive={isActive}
+          className={isActive ? "bg-accent text-accent-foreground" : undefined}
           onClick={() => onSelect(conversation.id)}
           onContextMenu={(event) => {
             if (!hasMenuAction) return;
@@ -717,6 +718,22 @@ export function ConversationSidebar({
     };
   }, [conversations.length]);
 
+  React.useEffect(() => {
+    if (!activeId || typeof document === "undefined") return;
+
+    const timer = window.setTimeout(() => {
+      const scrollContainer = document.getElementById("conversationScrollTarget");
+      const activeRow = scrollContainer?.querySelector<HTMLElement>(
+        `[data-conversation-id="${CSS.escape(activeId)}"]`,
+      );
+      activeRow?.scrollIntoView({ block: "nearest" });
+    }, 80);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [activeId, conversations.length]);
+
   return (
     <Sidebar collapsible="offcanvas" variant="sidebar">
       <SidebarHeader>
@@ -1121,8 +1138,6 @@ export function ConversationSidebar({
     </Sidebar>
   );
 }
-
-
 
 
 

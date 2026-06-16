@@ -100,22 +100,33 @@ export function useConversationList({
 
   const updateConversationSummary = React.useCallback(
     (update: ConversationSummaryUpdate) => {
-      setConversations((prev) =>
-        sortConversations(
+      setConversations((prev) => {
+        const nextItem: ConversationListDto = {
+          id: update.id,
+          assistantId: currentAssistantIdRef.current ?? "",
+          title: update.title,
+          isPinned: update.isPinned,
+          createAt: update.createAt,
+          updateAt: update.updateAt,
+          isGenerating: update.isGenerating,
+        };
+        const existing = prev.find((item) => item.id === update.id);
+        if (!existing) {
+          return sortConversations([...prev, nextItem]);
+        }
+
+        return sortConversations(
           prev.map((item) =>
             item.id === update.id
               ? {
                   ...item,
-                  title: update.title,
-                  isPinned: update.isPinned,
-                  createAt: update.createAt,
-                  updateAt: update.updateAt,
-                  isGenerating: update.isGenerating,
+                  ...nextItem,
+                  assistantId: item.assistantId,
                 }
               : item,
           ),
-        ),
-      );
+        );
+      });
     },
     [sortConversations],
   );

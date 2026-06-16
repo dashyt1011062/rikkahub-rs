@@ -1276,33 +1276,48 @@ const ConversationTimeline = React.memo(({
 
     const targetMessageId = scrollTarget.messageId?.trim();
     const targetNodeId = scrollTarget.nodeId?.trim();
-    let targetElement: HTMLElement | null = null;
+    const resolveTargetElement = () => {
+      if (targetMessageId) {
+        const directElement = document.getElementById(getConversationMessageAnchorId(targetMessageId));
+        if (directElement) return directElement;
+      }
 
-    if (targetMessageId) {
-      targetElement = document.getElementById(getConversationMessageAnchorId(targetMessageId));
-    }
-
-    if (!targetElement) {
       const anchors = Array.from(
         document.querySelectorAll<HTMLElement>("[data-conversation-message-anchor='true']"),
       );
-      targetElement =
+      return (
         anchors.find((anchor) => {
           const messageIds = anchor.dataset.messageIds?.split(" ") ?? [];
           return Boolean(targetMessageId && messageIds.includes(targetMessageId));
         }) ??
         anchors.find((anchor) => Boolean(targetNodeId && anchor.dataset.nodeId === targetNodeId)) ??
-        null;
-    }
+        null
+      );
+    };
 
-    if (!targetElement) {
+    if (!resolveTargetElement()) {
       return;
     }
 
-    window.setTimeout(() => {
-      targetElement?.scrollIntoView({ behavior: "smooth", block: "start" });
-      onScrollTargetHandled();
-    }, 80);
+    const delays = [80, 240, 520, 1000];
+    const timers = delays.map((delay, index) =>
+      window.setTimeout(() => {
+        const targetElement = resolveTargetElement();
+        if (!targetElement) return;
+
+        targetElement.scrollIntoView({
+          behavior: index === 0 ? "auto" : "smooth",
+          block: "start",
+        });
+        if (index === delays.length - 1) {
+          onScrollTargetHandled();
+        }
+      }, delay),
+    );
+
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, [detailError, detailLoading, onScrollTargetHandled, scrollTarget, timelineItems]);
 
   return (
