@@ -870,26 +870,6 @@ async fn openai_user_content_for_message(state: &AppState, account_id: &str, mes
         return Ok(Value::String(prompt_text_with_documents(state, account_id, &message.parts).await?));
     }
     let mut blocks = Vec::new();
-    let image_count = message
-        .parts
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str).map(|value| value.eq_ignore_ascii_case("image")) == Some(true))
-        .count();
-    let label_images = image_count > 1;
-    let has_text = message
-        .parts
-        .iter()
-        .any(|part| part.get("type").and_then(Value::as_str).map(|value| value.eq_ignore_ascii_case("text")) == Some(true)
-            && part.get("text").and_then(Value::as_str).map(|value| !value.trim().is_empty()).unwrap_or(false));
-    if label_images {
-        let prefix = if has_text {
-            format!("This user message contains exactly {image_count} attached image files. Inspect every attached image file in order and answer using all relevant attached images.")
-        } else {
-            format!("This user message contains exactly {image_count} attached image files and no text prompt. Inspect every attached image file in order, then answer the user's likely request based on all attached images.")
-        };
-        blocks.push(json!({ "type": "text", "text": prefix }));
-    }
-    let mut image_index = 0usize;
     for part in &message.parts {
         let kind = part.get("type").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
         match kind.as_str() {
@@ -900,10 +880,6 @@ async fn openai_user_content_for_message(state: &AppState, account_id: &str, mes
             }
             "image" => {
                 if let Some(url) = resolve_part_image_reference(state, account_id, part).await? {
-                    if label_images {
-                        image_index += 1;
-                        blocks.push(json!({ "type": "text", "text": format!("Attached image file {image_index} of {image_count}:") }));
-                    }
                     blocks.push(json!({ "type": "image_url", "image_url": { "url": url } }));
                 }
             }
