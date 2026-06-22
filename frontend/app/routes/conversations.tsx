@@ -422,9 +422,7 @@ function partToQuoteText(
         ? t("conversations.quote.parts.document_with_name", { name: part.fileName.trim() })
         : t("conversations.quote.parts.document");
     case "reasoning":
-      return part.reasoning.trim().length > 0
-        ? `${t("conversations.quote.parts.reasoning")}\n${part.reasoning.trim()}`
-        : t("conversations.quote.parts.reasoning");
+      return "";
     case "tool":
       return part.toolName.trim().length > 0
         ? t("conversations.quote.parts.tool_with_name", { name: part.toolName.trim() })
