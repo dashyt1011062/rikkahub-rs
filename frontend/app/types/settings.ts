@@ -110,6 +110,15 @@ export interface ProviderModel {
   [key: string]: unknown;
 }
 
+export interface ModelLibraryEntry {
+  modelId: string;
+  abilities?: ModelAbility[];
+  tools?: BuiltInTool[];
+  inputModalities?: ModelModality[];
+  outputModalities?: ModelModality[];
+  [key: string]: unknown;
+}
+
 export interface ProviderProfile {
   id: string;
   enabled: boolean;
@@ -144,6 +153,7 @@ export interface Settings {
   assistantTags: AssistantTag[];
   modeInjections?: ModeInjectionProfile[];
   lorebooks?: LorebookProfile[];
+  modelLibrary?: ModelLibraryEntry[];
   mcpServers: McpServerConfig[];
   searchServices: SearchServiceOption[];
   searchServiceSelected: number;

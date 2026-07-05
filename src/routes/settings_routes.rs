@@ -151,31 +151,207 @@ pub async fn model_builtin_tool(
     State(state): State<AppState>,
     Json(request): Json<Value>,
 ) -> AppResult<Json<Value>> {
-    let model_id = request.get("modelId").and_then(Value::as_str).unwrap_or_default().to_string();
+    let model_ref = request.get("modelId").and_then(Value::as_str).unwrap_or_default().to_string();
+    let provider_model_id = request
+        .get("providerModelId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let tool = request.get("tool").and_then(Value::as_str).unwrap_or_default().to_string();
     let enabled = request.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let target_tool = normalize_tool_type(&tool);
+    if target_tool.is_empty() {
+        return Ok(Json(json!({ "status": "ok" })));
+    }
+    let target_ref = normalize_model_ref(&model_ref);
+    let mut updated_refs: Vec<String> = Vec::new();
+    let mut source_tools: Option<Vec<Value>> = None;
+    let mut source_abilities: Option<Vec<Value>> = None;
+    let mut source_input_modalities: Option<Vec<Value>> = None;
+    let mut source_output_modalities: Option<Vec<Value>> = None;
+    let mut source_matched = false;
     update_settings(&state, &account.0, |settings| {
         for provider in settings.get_mut("providers").and_then(Value::as_array_mut).into_iter().flatten() {
             for model in provider.get_mut("models").and_then(Value::as_array_mut).into_iter().flatten() {
-                if model.get("id").and_then(Value::as_str) != Some(model_id.as_str()) {
+                let instance_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+                let model_id = model.get("modelId").and_then(Value::as_str).unwrap_or_default();
+                let model_ref_key = normalize_model_ref(model_id);
+
+                let provider_match = !provider_model_id.is_empty() && instance_id == provider_model_id;
+                let ref_match = if target_ref.is_empty() {
+                    false
+                } else if model_ref_key.is_empty() {
+                    false
+                } else {
+                    model_ref_key == target_ref
+                };
+                let legacy_match = !target_ref.is_empty() && normalize_model_ref(instance_id) == target_ref;
+                if !provider_match && !ref_match && !legacy_match {
                     continue;
                 }
                 if !model.get("tools").map(Value::is_array).unwrap_or(false) {
                     model["tools"] = json!([]);
                 }
+                if !model.get("abilities").map(Value::is_array).unwrap_or(false) {
+                    model["abilities"] = json!([]);
+                }
+                if !model.get("inputModalities").map(Value::is_array).unwrap_or(false) {
+                    model["inputModalities"] = json!([]);
+                }
+                if !model.get("outputModalities").map(Value::is_array).unwrap_or(false) {
+                    model["outputModalities"] = json!([]);
+                }
                 let tools = model.get_mut("tools").and_then(Value::as_array_mut).unwrap();
+                tools.retain(|item| {
+                    normalize_tool_type(item.get("type").and_then(Value::as_str).unwrap_or_default()) != target_tool
+                });
                 if enabled {
-                    if !tools.iter().any(|item| item.get("type").and_then(Value::as_str) == Some(tool.as_str())) {
-                        tools.push(json!({ "type": tool }));
-                    }
-                } else {
-                    tools.retain(|item| item.get("type").and_then(Value::as_str) != Some(tool.as_str()));
+                    tools.push(json!({ "type": target_tool }));
+                }
+                if !model_ref_key.is_empty() {
+                    updated_refs.push(model_ref_key);
+                }
+                if provider_match {
+                    source_tools = Some(tools.clone());
+                    source_abilities = Some(
+                        model
+                            .get("abilities")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    source_input_modalities = Some(
+                        model
+                            .get("inputModalities")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    source_output_modalities = Some(
+                        model
+                            .get("outputModalities")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    source_matched = true;
+                } else if !source_matched && source_tools.is_none() {
+                    source_tools = Some(tools.clone());
+                    source_abilities = Some(
+                        model
+                            .get("abilities")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    source_input_modalities = Some(
+                        model
+                            .get("inputModalities")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    source_output_modalities = Some(
+                        model
+                            .get("outputModalities")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
                 }
             }
         }
+
+        let Some(tools) = source_tools else {
+            return Ok(());
+        };
+        let Some(abilities) = source_abilities else {
+            return Ok(());
+        };
+        let Some(input_modalities) = source_input_modalities else {
+            return Ok(());
+        };
+        let Some(output_modalities) = source_output_modalities else {
+            return Ok(());
+        };
+
+        if updated_refs.is_empty() && !target_ref.is_empty() {
+            updated_refs.push(target_ref);
+        }
+
+        let mut unique_refs = Vec::new();
+        for ref_key in updated_refs {
+            if ref_key.is_empty() {
+                continue;
+            }
+            if !unique_refs.contains(&ref_key) {
+                unique_refs.push(ref_key);
+            }
+        }
+
+        if unique_refs.is_empty() {
+            return Ok(());
+        }
+
+        if !settings.get("modelLibrary").map(Value::is_array).unwrap_or(false) {
+            settings["modelLibrary"] = json!([]);
+        }
+        if let Some(library) = settings.get_mut("modelLibrary").and_then(Value::as_array_mut) {
+            for ref_key in &unique_refs {
+                let found = library.iter().position(|entry| {
+                    normalize_model_ref(entry.get("modelId").and_then(Value::as_str).unwrap_or_default())
+                        == *ref_key
+                });
+                if let Some(index) = found {
+                    library[index]["tools"] = Value::Array(tools.clone());
+                    library[index]["abilities"] = Value::Array(abilities.clone());
+                    library[index]["inputModalities"] = Value::Array(input_modalities.clone());
+                    library[index]["outputModalities"] = Value::Array(output_modalities.clone());
+                } else {
+                    let mut entry = json!({
+                        "modelId": ref_key,
+                        "tools": tools.clone(),
+                        "abilities": abilities.clone(),
+                        "inputModalities": input_modalities.clone(),
+                        "outputModalities": output_modalities.clone(),
+                    });
+                    if abilities.is_empty() {
+                        entry.as_object_mut().map(|item| item.remove("abilities"));
+                    }
+                    if input_modalities.is_empty() {
+                        entry.as_object_mut().map(|item| item.remove("inputModalities"));
+                    }
+                    if output_modalities.is_empty() {
+                        entry.as_object_mut().map(|item| item.remove("outputModalities"));
+                    }
+                    library.push(entry);
+                }
+            }
+        }
+
+        for provider in settings.get_mut("providers").and_then(Value::as_array_mut).into_iter().flatten() {
+            for model in provider.get_mut("models").and_then(Value::as_array_mut).into_iter().flatten() {
+                let model_ref_key = normalize_model_ref(model.get("modelId").and_then(Value::as_str).unwrap_or_default());
+                if unique_refs.contains(&model_ref_key) {
+                    model["tools"] = Value::Array(tools.clone());
+                    model["abilities"] = Value::Array(abilities.clone());
+                    model["inputModalities"] = Value::Array(input_modalities.clone());
+                    model["outputModalities"] = Value::Array(output_modalities.clone());
+                }
+            }
+        }
+
         Ok(())
     })
     .await
+}
+
+fn normalize_model_ref(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn normalize_tool_type(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 pub async fn provider_models_fetch(

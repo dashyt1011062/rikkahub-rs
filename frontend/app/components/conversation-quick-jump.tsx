@@ -142,26 +142,51 @@ function resolveScrollTargets(
   anchorOffsets: ConversationAnchorOffset[],
   scrollElement: HTMLElement,
 ) {
-  const viewportTop = scrollElement.scrollTop + SCROLL_ANCHOR_OFFSET;
-  let previousId: string | null = null;
-  let nextId: string | null = null;
+  const userOffsets = anchorOffsets.filter(isUserMessage);
+  if (userOffsets.length === 0) {
+    return { previousId: null, nextId: null };
+  }
 
-  for (const item of anchorOffsets) {
-    if (!isUserMessage(item)) {
-      continue;
-    }
-    if (item.top < viewportTop - MESSAGE_TOLERANCE) {
-      previousId = item.id;
-      continue;
-    }
-
-    if (item.top > viewportTop + MESSAGE_TOLERANCE) {
-      nextId = item.id;
-      break;
+  let anchorOffset = SCROLL_ANCHOR_OFFSET;
+  const firstAnchor = document.getElementById(getConversationMessageAnchorId(userOffsets[0].id));
+  if (firstAnchor) {
+    const scrollMarginTop = Number.parseFloat(window.getComputedStyle(firstAnchor).scrollMarginTop);
+    if (Number.isFinite(scrollMarginTop) && scrollMarginTop > 0) {
+      anchorOffset = scrollMarginTop;
     }
   }
 
-  return { previousId, nextId };
+  const currentLine = scrollElement.scrollTop + anchorOffset + MESSAGE_TOLERANCE;
+  let currentIndex = -1;
+
+  for (const [index, item] of userOffsets.entries()) {
+    if (item.top <= currentLine) {
+      currentIndex = index;
+      continue;
+    }
+    break;
+  }
+
+  return {
+    previousId: currentIndex > 0 ? (userOffsets[currentIndex - 1]?.id ?? null) : null,
+    nextId: userOffsets[currentIndex + 1]?.id ?? userOffsets[0]?.id ?? null,
+  };
+}
+
+function resolveAdjacentUserTargets(
+  items: ConversationQuickJumpItem[],
+  messageId: string,
+): { previousId: string | null; nextId: string | null } {
+  const userItems = items.filter(isUserMessage);
+  const currentIndex = userItems.findIndex((item) => item.id === messageId);
+  if (currentIndex < 0) {
+    return { previousId: null, nextId: null };
+  }
+
+  return {
+    previousId: userItems[currentIndex - 1]?.id ?? null,
+    nextId: userItems[currentIndex + 1]?.id ?? null,
+  };
 }
 
 function useConversationAnchorOffsets(items: ConversationQuickJumpItem[]) {
@@ -287,55 +312,55 @@ export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
   return (
     <div className="pointer-events-none absolute inset-y-0 right-4 z-20 hidden items-center lg:flex">
       <div className="pointer-events-auto flex max-h-[calc(100%-2rem)] flex-col items-end gap-1 overflow-y-auto py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          {items.map((item, index) => {
-            const isActive = activeMessageId === item.id;
-            const roleLabel = getRoleLabel(item.role, t);
+        {items.map((item, index) => {
+          const isActive = activeMessageId === item.id;
+          const roleLabel = getRoleLabel(item.role, t);
 
-            return (
-              <Tooltip key={`quick-jump-${item.id}`}>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    className="flex w-8 items-center justify-end gap-1 transition-colors"
-                    aria-label={t("quick_jump.jump_to_message", {
-                      index: index + 1,
-                      role: roleLabel,
-                    })}
-                    title={t("quick_jump.message_title", { index: index + 1, role: roleLabel })}
-                    onClick={() => {
-                      handleQuickJump(item.id);
-                    }}
-                  >
-                    <span
-                      className={cn(
-                        "h-1.5 w-5 rounded-full transition-colors",
-                        getRoleLineClass(item.role),
-                        isActive && "bg-foreground/80",
-                      )}
-                    />
-                    <span
-                      className={cn(
-                        "size-1.5 rounded-full transition-opacity duration-200",
-                        getRoleDotClass(item.role),
-                        isActive ? "animate-pulse opacity-100" : "opacity-0",
-                      )}
-                    />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="left" sideOffset={8} className="max-w-64 text-left">
-                  <div className="space-y-0.5">
-                    <div className="text-[11px] text-background/75">
-                      {index + 1}/{items.length} · {roleLabel}
-                    </div>
-                    <div>{item.preview?.trim() || t("quick_jump.no_preview")}</div>
+          return (
+            <Tooltip key={`quick-jump-${item.id}`}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="flex w-8 items-center justify-end gap-1 transition-colors"
+                  aria-label={t("quick_jump.jump_to_message", {
+                    index: index + 1,
+                    role: roleLabel,
+                  })}
+                  title={t("quick_jump.message_title", { index: index + 1, role: roleLabel })}
+                  onClick={() => {
+                    handleQuickJump(item.id);
+                  }}
+                >
+                  <span
+                    className={cn(
+                      "h-1.5 w-5 rounded-full transition-colors",
+                      getRoleLineClass(item.role),
+                      isActive && "bg-foreground/80",
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "size-1.5 rounded-full transition-opacity duration-200",
+                      getRoleDotClass(item.role),
+                      isActive ? "animate-pulse opacity-100" : "opacity-0",
+                    )}
+                  />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="left" sideOffset={8} className="max-w-64 text-left">
+                <div className="space-y-0.5">
+                  <div className="text-[11px] text-background/75">
+                    {index + 1}/{items.length} · {roleLabel}
                   </div>
-                </TooltipContent>
-              </Tooltip>
-            );
-          })}
-          <div className="mt-1 w-8 text-center text-[10px] text-muted-foreground/80 tabular-nums">
-            {activeIndex}/{items.length}
-          </div>
+                  <div>{item.preview?.trim() || t("quick_jump.no_preview")}</div>
+                </div>
+              </TooltipContent>
+            </Tooltip>
+          );
+        })}
+        <div className="mt-1 w-8 text-center text-[10px] text-muted-foreground/80 tabular-nums">
+          {activeIndex}/{items.length}
+        </div>
       </div>
     </div>
   );
@@ -346,11 +371,15 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
   const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = useConversationAnchorOffsets(items);
   const [direction, setDirection] = React.useState<"older" | "newer" | null>(null);
-  const [targets, setTargets] = React.useState<{ previousId: string | null; nextId: string | null }>({
+  const [targets, setTargets] = React.useState<{
+    previousId: string | null;
+    nextId: string | null;
+  }>({
     previousId: null,
     nextId: null,
   });
   const lastScrollTopRef = React.useRef(0);
+  const scrollSyncTimeoutRef = React.useRef<number | null>(null);
 
   const resolveTargets = React.useCallback(() => {
     const scrollElement = scrollRef.current;
@@ -358,6 +387,11 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
       ? resolveScrollTargets(anchorOffsetsRef.current, scrollElement)
       : { previousId: null, nextId: null };
   }, [anchorOffsetsRef, scrollRef]);
+
+  const syncTargets = React.useCallback(() => {
+    rebuildAnchorOffsets();
+    setTargets(resolveTargets());
+  }, [rebuildAnchorOffsets, resolveTargets]);
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -396,16 +430,32 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
       if (timeoutId !== null) {
         window.clearTimeout(timeoutId);
       }
+      if (scrollSyncTimeoutRef.current !== null) {
+        window.clearTimeout(scrollSyncTimeoutRef.current);
+        scrollSyncTimeoutRef.current = null;
+      }
     };
   }, [rebuildAnchorOffsets, resolveTargets, scrollRef]);
 
-  const scrollToMessage = React.useCallback((messageId: string, nextDirection: "older" | "newer") => {
-    const anchor = document.getElementById(getConversationMessageAnchorId(messageId));
-    if (!anchor) return;
+  const scrollToMessage = React.useCallback(
+    (messageId: string, nextDirection: "older" | "newer") => {
+      const anchor = document.getElementById(getConversationMessageAnchorId(messageId));
+      if (!anchor) return;
 
-    setDirection(nextDirection);
-    anchor.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
+      setDirection(nextDirection);
+      setTargets(resolveAdjacentUserTargets(items, messageId));
+      anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+
+      if (scrollSyncTimeoutRef.current !== null) {
+        window.clearTimeout(scrollSyncTimeoutRef.current);
+      }
+      scrollSyncTimeoutRef.current = window.setTimeout(() => {
+        scrollSyncTimeoutRef.current = null;
+        syncTargets();
+      }, 320);
+    },
+    [items, syncTargets],
+  );
 
   const handleScrollToBottom = React.useCallback(() => {
     setDirection("newer");

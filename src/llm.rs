@@ -88,6 +88,10 @@ where
         return generate_google(state, account_id, &selection, conversation).await;
     }
 
+    if use_openai_responses_api(&selection.provider) {
+        return generate_openai_responses_streaming(state, account_id, settings, &selection, conversation, on_partial).await;
+    }
+
     let messages = build_openai_messages(state, account_id, conversation, &selection.assistant).await?;
     let available_tools = mcp::build_available_tools(settings, &selection.assistant);
     let model_id = selection.model.get("id").and_then(Value::as_str).map(str::to_string);
@@ -98,6 +102,7 @@ where
         "stream_options": { "include_usage": true },
     });
     add_generation_options(&mut payload, &selection.assistant);
+    add_openai_chat_reasoning(&mut payload, &selection.assistant, &selection.model);
     add_openai_tools(&mut payload, &available_tools);
     add_custom_bodies(&mut payload, &selection.model);
 
@@ -200,6 +205,167 @@ where
 
     if content.trim().is_empty() && reasoning.trim().is_empty() && tool_calls.is_empty() {
         return generate_reply_non_streaming(state, account_id, settings, &selection, conversation, true).await;
+    }
+
+    Ok(AssistantGenerationResult {
+        parts: build_final_parts_with_tools(&content, &reasoning, &tool_calls, &available_tools),
+        model_id,
+        usage,
+    })
+}
+
+async fn generate_openai_responses_streaming<F, Fut>(
+    state: &AppState,
+    account_id: &str,
+    settings: &Value,
+    selection: &Selection,
+    conversation: &ConversationDto,
+    mut on_partial: F,
+) -> AppResult<AssistantGenerationResult>
+where
+    F: FnMut(AssistantGenerationResult) -> Fut,
+    Fut: std::future::Future<Output = AppResult<()>>,
+{
+    let input = build_openai_responses_input(state, account_id, conversation, &selection.assistant).await?;
+    let available_tools = mcp::build_available_tools(settings, &selection.assistant);
+    let model_id = selection.model.get("id").and_then(Value::as_str).map(str::to_string);
+    let mut payload = json!({
+        "model": selection.model.get("modelId").and_then(Value::as_str).unwrap_or("auto"),
+        "input": input,
+        "stream": true,
+    });
+    add_responses_generation_options(&mut payload, &selection.assistant);
+    add_openai_responses_reasoning(&mut payload, &selection.assistant, &selection.model);
+    add_openai_responses_tools(&mut payload, &available_tools);
+    add_custom_bodies(&mut payload, &selection.model);
+
+    let request = state
+        .http
+        .post(join_url(
+            selection.provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.openai.com/v1"),
+            "/responses",
+        ))
+        .bearer_auth(selection.api_key.clone());
+    let response = apply_custom_headers(request, &selection.model)?
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(AppError::bad_request(format!(
+            "Provider request failed ({}): {}",
+            status.as_u16(),
+            body.chars().take(400).collect::<String>()
+        )));
+    }
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut usage = None;
+    let mut buffer = String::new();
+    let mut tool_calls = std::collections::BTreeMap::<usize, StreamingToolCall>::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| AppError::bad_request(format!("Provider stream failed: {error}")))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(index) = buffer.find('\n') {
+            let line = buffer[..index].trim().to_string();
+            buffer = buffer[index + 1..].to_string();
+            if !line.starts_with("data:") {
+                continue;
+            }
+            let data = line.trim_start_matches("data:").trim();
+            if data.is_empty() {
+                continue;
+            }
+            if data == "[DONE]" {
+                break;
+            }
+            let Ok(chunk_json) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+
+            if let Some(value) = chunk_json.get("response").and_then(|response| response.get("usage")).filter(|value| !value.is_null()) {
+                usage = Some(value.clone());
+            } else if let Some(value) = chunk_json.get("usage").filter(|value| !value.is_null()) {
+                usage = Some(value.clone());
+            }
+
+            let mut changed = false;
+            let event_type = chunk_json.get("type").and_then(Value::as_str).unwrap_or_default();
+            match event_type {
+                "response.output_text.delta" | "response.text.delta" => {
+                    if let Some(delta) = chunk_json.get("delta").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                        content.push_str(delta);
+                        changed = true;
+                    }
+                }
+                "response.output_text.done" | "response.text.done" => {
+                    if content.trim().is_empty() {
+                        if let Some(text) = chunk_json.get("text").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+                            content.push_str(text);
+                            changed = true;
+                        }
+                    }
+                }
+                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                    if let Some(delta) = chunk_json.get("delta").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                        reasoning.push_str(delta);
+                        changed = true;
+                    }
+                }
+                "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
+                    if reasoning.trim().is_empty() {
+                        if let Some(text) = chunk_json.get("text").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+                            reasoning.push_str(text);
+                            changed = true;
+                        }
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    collect_responses_function_arguments_delta(&chunk_json, &mut tool_calls);
+                }
+                "response.output_item.added" | "response.output_item.done" => {
+                    if let Some(item) = chunk_json.get("item") {
+                        let output_index = chunk_json
+                            .get("output_index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(tool_calls.len() as u64) as usize;
+                        collect_responses_output_item(
+                            item,
+                            output_index,
+                            &mut content,
+                            &mut reasoning,
+                            &mut tool_calls,
+                        );
+                    }
+                }
+                "response.completed" => {
+                    if let Some(response) = chunk_json.get("response") {
+                        let before = (content.len(), reasoning.len(), tool_calls.len());
+                        collect_responses_output(response, &mut content, &mut reasoning, &mut tool_calls);
+                        changed |= before != (content.len(), reasoning.len(), tool_calls.len());
+                    }
+                }
+                _ => {}
+            }
+
+            if changed {
+                on_partial(AssistantGenerationResult {
+                    parts: build_streaming_parts(&content, &reasoning),
+                    model_id: model_id.clone(),
+                    usage: None,
+                })
+                .await?;
+            }
+        }
+    }
+
+    if content.trim().is_empty() && reasoning.trim().is_empty() && tool_calls.is_empty() {
+        return generate_openai_responses_non_streaming(state, account_id, settings, selection, conversation, true).await;
     }
 
     Ok(AssistantGenerationResult {
@@ -450,8 +616,58 @@ async fn generate_reply_non_streaming(
     match selection.provider_type.as_str() {
         "anthropic" => generate_anthropic(state, account_id, selection, conversation).await,
         "google" => generate_google(state, account_id, selection, conversation).await,
+        _ if use_openai_responses_api(&selection.provider) => {
+            generate_openai_responses_non_streaming(state, account_id, settings, selection, conversation, include_tools).await
+        }
         _ => generate_openai_non_streaming(state, account_id, settings, selection, conversation, include_tools).await,
     }
+}
+
+async fn generate_openai_responses_non_streaming(
+    state: &AppState,
+    account_id: &str,
+    settings: &Value,
+    selection: &Selection,
+    conversation: &ConversationDto,
+    include_tools: bool,
+) -> AppResult<AssistantGenerationResult> {
+    let input = build_openai_responses_input(state, account_id, conversation, &selection.assistant).await?;
+    let available_tools = if include_tools {
+        mcp::build_available_tools(settings, &selection.assistant)
+    } else {
+        Vec::new()
+    };
+    let mut payload = json!({
+        "model": selection.model.get("modelId").and_then(Value::as_str).unwrap_or("auto"),
+        "input": input,
+    });
+    add_responses_generation_options(&mut payload, &selection.assistant);
+    add_openai_responses_reasoning(&mut payload, &selection.assistant, &selection.model);
+    add_openai_responses_tools(&mut payload, &available_tools);
+    add_custom_bodies(&mut payload, &selection.model);
+
+    let request = state
+        .http
+        .post(join_url(
+            selection.provider.get("baseUrl").and_then(Value::as_str).unwrap_or("https://api.openai.com/v1"),
+            "/responses",
+        ))
+        .bearer_auth(selection.api_key.clone());
+    let response = apply_custom_headers(request, &selection.model)?
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
+    let body = read_provider_json(response).await?;
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls = std::collections::BTreeMap::<usize, StreamingToolCall>::new();
+    collect_responses_output(&body, &mut content, &mut reasoning, &mut tool_calls);
+    Ok(AssistantGenerationResult {
+        parts: build_final_parts_with_tools(&content, &reasoning, &tool_calls, &available_tools),
+        model_id: selection.model.get("id").and_then(Value::as_str).map(str::to_string),
+        usage: body.get("usage").cloned(),
+    })
 }
 
 async fn generate_openai_non_streaming(
@@ -473,6 +689,7 @@ async fn generate_openai_non_streaming(
         "messages": messages,
     });
     add_generation_options(&mut payload, &selection.assistant);
+    add_openai_chat_reasoning(&mut payload, &selection.assistant, &selection.model);
     add_openai_tools(&mut payload, &available_tools);
     add_custom_bodies(&mut payload, &selection.model);
     let url = join_url(
@@ -644,6 +861,7 @@ async fn generate_anthropic_messages(
         payload["system"] = Value::String(system_prompt.to_string());
     }
     add_generation_options(&mut payload, &selection.assistant);
+    add_anthropic_thinking(&mut payload, &selection.assistant, &selection.model);
     add_custom_bodies(&mut payload, &selection.model);
 
     let request = state
@@ -660,17 +878,9 @@ async fn generate_anthropic_messages(
         .await
         .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
     let body = read_provider_json(response).await?;
-    let content = body
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (content, reasoning) = extract_anthropic_text_and_reasoning(&body);
     Ok(AssistantGenerationResult {
-        parts: build_final_parts(&content, ""),
+        parts: build_final_parts(&content, &reasoning),
         model_id: selection.model.get("id").and_then(Value::as_str).map(str::to_string),
         usage: body.get("usage").cloned(),
     })
@@ -706,6 +916,7 @@ async fn generate_google_messages(
     if !generation_config.is_empty() {
         payload["generationConfig"] = Value::Object(generation_config);
     }
+    add_google_thinking_config(&mut payload, &selection.assistant, &selection.model);
     add_custom_bodies(&mut payload, &selection.model);
 
     let model = selection.model.get("modelId").and_then(Value::as_str).unwrap_or("gemini-2.0-flash");
@@ -718,21 +929,9 @@ async fn generate_google_messages(
         .await
         .map_err(|error| AppError::bad_request(format!("Provider request failed: {error}")))?;
     let body = read_provider_json(response).await?;
-    let content = body
-        .get("candidates")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("content"))
-        .and_then(|content| content.get("parts"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (content, reasoning) = extract_google_text_and_reasoning(&body);
     Ok(AssistantGenerationResult {
-        parts: build_final_parts(&content, ""),
+        parts: build_final_parts(&content, &reasoning),
         model_id: selection.model.get("id").and_then(Value::as_str).map(str::to_string),
         usage: body.get("usageMetadata").cloned(),
     })
@@ -1126,6 +1325,101 @@ async fn google_parts_for_message(state: &AppState, message: &ProviderChatMessag
     Ok(parts)
 }
 
+async fn build_openai_responses_input(
+    state: &AppState,
+    account_id: &str,
+    conversation: &ConversationDto,
+    assistant: &Value,
+) -> AppResult<Vec<Value>> {
+    let messages = build_openai_messages(state, account_id, conversation, assistant).await?;
+    Ok(messages
+        .into_iter()
+        .flat_map(openai_message_to_responses_items)
+        .collect())
+}
+
+fn openai_message_to_responses_items(message: Value) -> Vec<Value> {
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+    if role == "tool" {
+        return vec![json!({
+            "type": "function_call_output",
+            "call_id": message.get("tool_call_id").and_then(Value::as_str).unwrap_or_default(),
+            "output": message.get("content").and_then(Value::as_str).unwrap_or_default(),
+        })];
+    }
+
+    let mut items = Vec::new();
+    let content = message.get("content").cloned().unwrap_or(Value::String(String::new()));
+    let response_content = responses_content_for_openai_content(&content, role);
+    if !response_content.is_empty() {
+        items.push(json!({
+            "type": "message",
+            "role": role,
+            "content": response_content,
+        }));
+    }
+
+    for call in message.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+        let Some(function) = call.get("function") else {
+            continue;
+        };
+        let name = function.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name.trim().is_empty() {
+            continue;
+        }
+        items.push(json!({
+            "type": "function_call",
+            "call_id": call.get("id").and_then(Value::as_str).filter(|value| !value.is_empty()).unwrap_or_else(|| call.get("call_id").and_then(Value::as_str).unwrap_or_default()),
+            "name": name,
+            "arguments": function.get("arguments").and_then(Value::as_str).unwrap_or("{}"),
+        }));
+    }
+
+    items
+}
+
+fn responses_content_for_openai_content(content: &Value, role: &str) -> Vec<Value> {
+    let text_type = if role.eq_ignore_ascii_case("assistant") {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    match content {
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![json!({ "type": text_type, "text": text })]
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+                match kind {
+                    "text" | "input_text" | "output_text" => item
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| json!({ "type": text_type, "text": text })),
+                    "image_url" | "input_image" => {
+                        let url = item
+                            .get("image_url")
+                            .and_then(|value| value.get("url"))
+                            .and_then(Value::as_str)
+                            .or_else(|| item.get("image_url").and_then(Value::as_str))
+                            .or_else(|| item.get("url").and_then(Value::as_str))
+                            .filter(|value| !value.trim().is_empty())?;
+                        Some(json!({ "type": "input_image", "image_url": url }))
+                    }
+                    _ => None,
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 async fn image_bytes_from_url(state: &AppState, raw_url: &str) -> AppResult<Option<(Bytes, String)>> {
     let url = raw_url.trim();
     if url.is_empty() {
@@ -1203,6 +1497,32 @@ fn add_openai_tools(payload: &mut Value, tools: &[AvailableTool]) {
     object.insert("tool_choice".to_string(), Value::String("auto".to_string()));
 }
 
+fn add_openai_responses_tools(payload: &mut Value, tools: &[AvailableTool]) {
+    if tools.is_empty() {
+        return;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "tools".to_string(),
+        Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "name": tool.name.clone(),
+                        "description": tool.description.clone(),
+                        "parameters": tool.parameters.clone(),
+                    })
+                })
+                .collect(),
+        ),
+    );
+    object.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+}
+
 fn collect_streaming_tool_calls(delta: &Value, out: &mut std::collections::BTreeMap<usize, StreamingToolCall>) {
     for item in delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
         let index = item.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -1218,6 +1538,117 @@ fn collect_streaming_tool_calls(delta: &Value, out: &mut std::collections::BTree
                 entry.arguments.push_str(arguments);
             }
         }
+    }
+}
+
+fn collect_responses_function_arguments_delta(event: &Value, out: &mut std::collections::BTreeMap<usize, StreamingToolCall>) {
+    let index = event
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(out.len() as u64) as usize;
+    let entry = out.entry(index).or_default();
+    if let Some(delta) = event.get("delta").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        entry.arguments.push_str(delta);
+    }
+}
+
+fn collect_responses_output(
+    response: &Value,
+    content: &mut String,
+    reasoning: &mut String,
+    tool_calls: &mut std::collections::BTreeMap<usize, StreamingToolCall>,
+) {
+    for (index, item) in response.get("output").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        collect_responses_output_item(item, index, content, reasoning, tool_calls);
+    }
+}
+
+fn collect_responses_output_item(
+    item: &Value,
+    index: usize,
+    content: &mut String,
+    reasoning: &mut String,
+    tool_calls: &mut std::collections::BTreeMap<usize, StreamingToolCall>,
+) {
+    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "message" => {
+            if !content.trim().is_empty() {
+                return;
+            }
+            let text = item
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(content_part_text)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.trim().is_empty() {
+                content.push_str(&text);
+            }
+        }
+        "reasoning" => {
+            if !reasoning.trim().is_empty() {
+                return;
+            }
+            let text = responses_reasoning_text(item);
+            if !text.trim().is_empty() {
+                reasoning.push_str(&text);
+            }
+        }
+        "function_call" => {
+            let entry = tool_calls.entry(index).or_default();
+            if let Some(id) = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("id").and_then(Value::as_str))
+                .filter(|value| !value.is_empty())
+            {
+                entry.id = Some(id.to_string());
+            }
+            if let Some(name) = item.get("name").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                entry.name = name.to_string();
+            }
+            if let Some(arguments) = item.get("arguments").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                entry.arguments = arguments.to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn content_part_text(part: &Value) -> Option<&str> {
+    part.get("text")
+        .and_then(Value::as_str)
+        .or_else(|| part.get("content").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn responses_reasoning_text(item: &Value) -> String {
+    let mut chunks = Vec::new();
+    collect_text_value(item.get("summary"), &mut chunks);
+    collect_text_value(item.get("content"), &mut chunks);
+    collect_text_value(item.get("text"), &mut chunks);
+    collect_text_value(item.get("reasoning"), &mut chunks);
+    collect_text_value(item.get("reasoning_content"), &mut chunks);
+    chunks.join("\n")
+}
+
+fn collect_text_value<'a>(value: Option<&'a Value>, out: &mut Vec<&'a str>) {
+    match value {
+        Some(Value::String(text)) if !text.trim().is_empty() => out.push(text),
+        Some(Value::Array(items)) => {
+            for item in items {
+                collect_text_value(Some(item), out);
+            }
+        }
+        Some(Value::Object(object)) => {
+            for key in ["text", "content", "summary_text", "thinking", "reasoning", "reasoning_content"] {
+                collect_text_value(object.get(key), out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1389,6 +1820,57 @@ async fn read_provider_json(response: reqwest::Response) -> AppResult<Value> {
         .map_err(|error| AppError::bad_request(format!("Provider returned invalid JSON: {error}")))
 }
 
+fn extract_anthropic_text_and_reasoning(body: &Value) -> (String, String) {
+    let mut content = Vec::new();
+    let mut reasoning = Vec::new();
+    for item in body.get("content").and_then(Value::as_array).into_iter().flatten() {
+        match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "thinking" => {
+                if let Some(text) = item
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("text").and_then(Value::as_str))
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    reasoning.push(text);
+                }
+            }
+            "text" | "" => {
+                if let Some(text) = item.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty()) {
+                    content.push(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    (content.join("\n"), reasoning.join("\n"))
+}
+
+fn extract_google_text_and_reasoning(body: &Value) -> (String, String) {
+    let mut content = Vec::new();
+    let mut reasoning = Vec::new();
+    for part in body
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(text) = part.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty()) else {
+            continue;
+        };
+        if part.get("thought").and_then(Value::as_bool) == Some(true) {
+            reasoning.push(text);
+        } else {
+            content.push(text);
+        }
+    }
+    (content.join("\n"), reasoning.join("\n"))
+}
+
 fn build_title_input(conversation: &ConversationDto) -> String {
     selected_messages(conversation)
         .into_iter()
@@ -1440,6 +1922,151 @@ fn encode_google_model_id(model: &str) -> String {
     out
 }
 
+fn use_openai_responses_api(provider: &Value) -> bool {
+    provider.get("useResponseApi").and_then(Value::as_bool) == Some(true)
+}
+
+fn model_supports_reasoning(model: &Value) -> bool {
+    if model
+        .get("abilities")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|value| value.eq_ignore_ascii_case("REASONING"))
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let name = [
+        model.get("modelId").and_then(Value::as_str),
+        model.get("displayName").and_then(Value::as_str),
+        model.get("id").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase();
+
+    model_name_implies_reasoning(&name)
+}
+
+fn model_name_implies_reasoning(name: &str) -> bool {
+    if name.contains("reason") || name.contains("thinking") || name.contains("think") {
+        return true;
+    }
+    if name.contains("gpt-5") || name.contains("gemini-pro-agent") {
+        return true;
+    }
+    if name.contains("gemini-2.5") || name.contains("gemini-3") {
+        return true;
+    }
+    if name.contains("claude-4")
+        || name.contains("claude-opus-4")
+        || name.contains("claude-sonnet-4")
+        || name.contains("claude-3-7")
+    {
+        return true;
+    }
+    name.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| matches!(part, "o1" | "o3" | "o4" | "o5"))
+}
+
+fn thinking_budget_for_model(assistant: &Value, model: &Value) -> Option<i64> {
+    if !model_supports_reasoning(model) {
+        return None;
+    }
+    assistant.get("thinkingBudget").and_then(value_to_i64)
+}
+
+fn reasoning_effort_from_budget(budget: i64) -> Option<&'static str> {
+    match budget {
+        i64::MIN..=-2 => None,
+        -1 => Some("auto"),
+        0 => None,
+        1..=1024 => Some("low"),
+        1025..=16000 => Some("medium"),
+        _ => Some("high"),
+    }
+}
+
+fn add_openai_chat_reasoning(payload: &mut Value, assistant: &Value, model: &Value) {
+    let Some(effort) = thinking_budget_for_model(assistant, model).and_then(reasoning_effort_from_budget) else {
+        return;
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("reasoning_effort".to_string(), Value::String(effort.to_string()));
+    }
+}
+
+fn add_openai_responses_reasoning(payload: &mut Value, assistant: &Value, model: &Value) {
+    let Some(effort) = thinking_budget_for_model(assistant, model).and_then(reasoning_effort_from_budget) else {
+        return;
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("reasoning".to_string(), json!({ "effort": effort }));
+    }
+}
+
+fn add_anthropic_thinking(payload: &mut Value, assistant: &Value, model: &Value) {
+    let Some(budget) = thinking_budget_for_model(assistant, model) else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+
+    match budget {
+        i64::MIN..=-2 => {}
+        0 => {
+            object.insert("thinking".to_string(), json!({ "type": "disabled" }));
+        }
+        -1 => {
+            object.insert("thinking".to_string(), json!({ "type": "enabled" }));
+        }
+        value => {
+            object.insert("thinking".to_string(), json!({ "type": "enabled", "budget_tokens": value }));
+            let min_max_tokens = value.saturating_add(1024);
+            let current = object.get("max_tokens").and_then(value_to_i64).unwrap_or(0);
+            if current <= value {
+                object.insert("max_tokens".to_string(), json!(min_max_tokens));
+            }
+        }
+    }
+}
+
+fn add_google_thinking_config(payload: &mut Value, assistant: &Value, model: &Value) {
+    let Some(budget) = thinking_budget_for_model(assistant, model) else {
+        return;
+    };
+    if budget < -1 {
+        return;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    let generation_config = object
+        .entry("generationConfig".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !generation_config.is_object() {
+        *generation_config = Value::Object(Map::new());
+    }
+    let Some(generation_config) = generation_config.as_object_mut() else {
+        return;
+    };
+    generation_config.insert(
+        "thinkingConfig".to_string(),
+        json!({
+            "thinkingBudget": budget,
+            "includeThoughts": budget != 0,
+        }),
+    );
+}
+
 fn add_generation_options(payload: &mut Value, assistant: &Value) {
     let Some(object) = payload.as_object_mut() else {
         return;
@@ -1452,6 +2079,21 @@ fn add_generation_options(payload: &mut Value, assistant: &Value) {
     }
     if let Some(value) = assistant.get("maxTokens").and_then(Value::as_i64) {
         object.insert("max_tokens".to_string(), json!(value));
+    }
+}
+
+fn add_responses_generation_options(payload: &mut Value, assistant: &Value) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    if let Some(value) = assistant.get("temperature").and_then(Value::as_f64) {
+        object.insert("temperature".to_string(), json!(value));
+    }
+    if let Some(value) = assistant.get("topP").and_then(Value::as_f64) {
+        object.insert("top_p".to_string(), json!(value));
+    }
+    if let Some(value) = assistant.get("maxTokens").and_then(Value::as_i64) {
+        object.insert("max_output_tokens".to_string(), json!(value));
     }
 }
 

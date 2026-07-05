@@ -42,13 +42,30 @@ import {
 } from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
 import { ScrollArea } from "~/components/ui/scroll-area";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
-import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "~/components/ui/sheet";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "~/components/ui/sheet";
 import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import api from "~/services/api";
 import { useSettingsStore } from "~/stores";
-import type { FetchProviderModelsRequestDto, FetchProviderModelsResponseDto, ProviderModelFetchDto } from "~/types/dto";
+import type {
+  FetchProviderModelsRequestDto,
+  FetchProviderModelsResponseDto,
+  ProviderModelFetchDto,
+} from "~/types/dto";
 
 export function meta() {
   return [{ title: "设置 - 供应商" }];
@@ -62,6 +79,13 @@ type ModelAbility = "TOOL" | "REASONING";
 type ProxyType = "none" | "http" | "socks5";
 type ProviderDetailTab = "config" | "models";
 type ModelEditorTab = "basic" | "advanced" | "tools";
+
+interface ModelLibraryTemplate {
+  abilities: string[];
+  tools: AnyRecord[];
+  inputModalities: string[];
+  outputModalities: string[];
+}
 
 interface ProviderFetchState {
   loading: boolean;
@@ -135,7 +159,13 @@ const PROXY_TYPES: Array<{ value: ProxyType; label: string }> = [
 ];
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
-  { key: "openai", name: "OpenAI", type: "openai", baseUrl: "https://api.openai.com/v1", enabled: true },
+  {
+    key: "openai",
+    name: "OpenAI",
+    type: "openai",
+    baseUrl: "https://api.openai.com/v1",
+    enabled: true,
+  },
   {
     key: "gemini",
     name: "Gemini",
@@ -307,6 +337,220 @@ function ensureArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function ensureStringValues(value: unknown): string[] {
+  return [
+    ...new Set(
+      ensureArray<unknown>(value)
+        .map((item) => getString(item).trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function normalizeToolType(value: unknown): string {
+  return getString(value).trim().toLowerCase();
+}
+
+function normalizeToolList(value: unknown): AnyRecord[] {
+  const normalized: Array<{ type: string }> = [];
+  for (const item of ensureArray<unknown>(value)) {
+    if (typeof item === "string") {
+      const type = normalizeToolType(item);
+      if (type.length > 0) {
+        normalized.push({ type });
+      }
+      continue;
+    }
+
+    if (item && typeof item === "object") {
+      const source = item as AnyRecord;
+      const type = normalizeToolType(source.type);
+      if (type.length > 0) {
+        normalized.push({ type });
+      }
+    }
+  }
+
+  return normalized.filter((tool, index, items) => {
+    return index === items.findIndex((item) => item.type === tool.type);
+  }) as AnyRecord[];
+}
+
+function normalizeModalityType(value: unknown): string {
+  const normalized = getString(value).trim().toUpperCase();
+  if (normalized === "TEXT" || normalized === "IMAGE") {
+    return normalized;
+  }
+  return "";
+}
+
+function normalizeModalityList(value: unknown): string[] {
+  const normalized: string[] = [];
+  for (const item of ensureArray<unknown>(value)) {
+    const normalizedItem = normalizeModalityType(item);
+    if (normalizedItem.length > 0 && !normalized.includes(normalizedItem)) {
+      normalized.push(normalizedItem);
+    }
+  }
+  return normalized;
+}
+
+function readModelLibrary(settings: AnyRecord | null): AnyRecord[] {
+  return ensureArray<AnyRecord>(settings?.modelLibrary);
+}
+
+function normalizeModelRef(value: unknown): string {
+  return getString(value).trim().toLowerCase();
+}
+
+function buildModelLibraryTemplate(
+  settings: AnyRecord | null,
+  modelId: string,
+): ModelLibraryTemplate {
+  const targetRef = normalizeModelRef(modelId);
+  if (!targetRef) {
+    return {
+      abilities: ["TOOL"],
+      tools: [],
+      inputModalities: ["TEXT"],
+      outputModalities: ["TEXT"],
+    };
+  }
+  const entry = readModelLibrary(settings).find(
+    (item) => normalizeModelRef(item.modelId) === targetRef,
+  );
+  if (!entry) {
+    return {
+      abilities: ["TOOL"],
+      tools: [],
+      inputModalities: ["TEXT"],
+      outputModalities: ["TEXT"],
+    };
+  }
+  return {
+    abilities: ensureStringValues(entry.abilities),
+    tools: normalizeToolList(entry.tools),
+    inputModalities: normalizeModalityList(entry.inputModalities),
+    outputModalities: normalizeModalityList(entry.outputModalities),
+  };
+}
+
+function mergeModelLibraryTemplate(
+  defaultTemplate: ModelLibraryTemplate,
+  customTemplate: ModelLibraryTemplate,
+): ModelLibraryTemplate {
+  return {
+    abilities:
+      customTemplate.abilities.length > 0 ? customTemplate.abilities : defaultTemplate.abilities,
+    tools: customTemplate.tools.length > 0 ? customTemplate.tools : defaultTemplate.tools,
+    inputModalities:
+      customTemplate.inputModalities.length > 0
+        ? customTemplate.inputModalities
+        : defaultTemplate.inputModalities,
+    outputModalities:
+      customTemplate.outputModalities.length > 0
+        ? customTemplate.outputModalities
+        : defaultTemplate.outputModalities,
+  };
+}
+
+function modelTemplateFromLibrary(
+  settings: AnyRecord | null,
+  modelId: string,
+  fallback: ModelLibraryTemplate,
+): ModelLibraryTemplate {
+  return mergeModelLibraryTemplate(fallback, buildModelLibraryTemplate(settings, modelId));
+}
+
+function findModelLibraryIndex(library: AnyRecord[], modelRef: string): number {
+  return library.findIndex((item) => normalizeModelRef(item.modelId) === modelRef);
+}
+
+function syncModelAbilitiesToLibrary(
+  library: AnyRecord[],
+  modelRef: string,
+  abilities: string[],
+  tools: AnyRecord[],
+  inputModalities: string[],
+  outputModalities: string[],
+): AnyRecord[] {
+  if (!modelRef) {
+    return library;
+  }
+
+  const index = findModelLibraryIndex(library, modelRef);
+  if (index >= 0) {
+    library[index] = {
+      ...(library[index] as AnyRecord),
+      modelId: getString(library[index].modelId, modelRef),
+      abilities,
+      tools,
+      inputModalities,
+      outputModalities,
+    };
+    return library;
+  }
+
+  library.push({
+    modelId: modelRef,
+    abilities,
+    tools,
+    inputModalities,
+    outputModalities,
+  });
+  return library;
+}
+
+function syncModelRefAcrossProviders(
+  settings: AnyRecord,
+  modelRef: string,
+  abilities: string[],
+  tools: AnyRecord[],
+  inputModalities: string[],
+  outputModalities: string[],
+): void {
+  if (!modelRef) {
+    return;
+  }
+
+  const nextProviders = ensureArray<AnyRecord>(settings.providers);
+  for (const provider of nextProviders) {
+    const nextModels = ensureArray<AnyRecord>(provider.models);
+    provider.models = nextModels.map((item) => {
+      if (normalizeModelRef(item.modelId) !== modelRef) {
+        return item;
+      }
+      return {
+        ...item,
+        abilities,
+        tools,
+        inputModalities,
+        outputModalities,
+      };
+    });
+  }
+  settings.providers = nextProviders;
+}
+
+function removeModelLibraryIfUnused(
+  library: AnyRecord[],
+  providers: AnyRecord[],
+  modelRef: string,
+): AnyRecord[] {
+  if (!modelRef) {
+    return library;
+  }
+  const used = ensureArray<AnyRecord>(providers).some((provider) =>
+    ensureArray<AnyRecord>(provider.models).some(
+      (model) => normalizeModelRef(model.modelId) === modelRef,
+    ),
+  );
+  if (used) {
+    return library;
+  }
+  return library.filter((item) => normalizeModelRef(item.modelId) !== modelRef);
+}
+
 function normalizeProviderType(value: unknown): ProviderType {
   const normalized = getString(value).trim().toLowerCase();
   if (normalized === "google") return "google";
@@ -358,7 +602,8 @@ function buildDefaultProxy(): ProviderProxyDraft {
 function readProxy(provider: AnyRecord): ProviderProxyDraft {
   const source = (provider.proxy as AnyRecord | undefined) ?? {};
   const normalizedType = getString(source.type).trim().toLowerCase();
-  const type: ProxyType = normalizedType === "http" || normalizedType === "socks5" ? normalizedType : "none";
+  const type: ProxyType =
+    normalizedType === "http" || normalizedType === "socks5" ? normalizedType : "none";
   return {
     type,
     address: getString(source.address),
@@ -385,18 +630,35 @@ function readBalanceOption(provider: AnyRecord): ProviderBalanceDraft {
   };
 }
 
-function buildDefaultModel(seed?: Partial<ProviderModelFetchDto>): AnyRecord {
+function buildDefaultModel(
+  seed?: Partial<ProviderModelFetchDto>,
+  template?: ModelLibraryTemplate,
+): AnyRecord {
   const type = normalizeModelType(seed?.type);
   const imageModel = type === "IMAGE";
+  const nextTemplate: ModelLibraryTemplate = mergeModelLibraryTemplate(
+    {
+      abilities: ["TOOL"],
+      tools: [],
+      inputModalities: imageModel ? ["TEXT", "IMAGE"] : ["TEXT"],
+      outputModalities: imageModel ? ["TEXT", "IMAGE"] : ["TEXT"],
+    },
+    template ?? {
+      abilities: ["TOOL"],
+      tools: [],
+      inputModalities: imageModel ? ["TEXT", "IMAGE"] : ["TEXT"],
+      outputModalities: imageModel ? ["TEXT", "IMAGE"] : ["TEXT"],
+    },
+  );
   return {
     id: uuidv4(),
     modelId: getString(seed?.modelId, "gpt-4.1"),
     displayName: getString(seed?.displayName, getString(seed?.modelId, "GPT-4.1")),
     type,
-    inputModalities: imageModel ? ["TEXT", "IMAGE"] : ["TEXT"],
-    outputModalities: imageModel ? ["TEXT", "IMAGE"] : ["TEXT"],
-    abilities: ["TOOL"],
-    tools: [],
+    inputModalities: nextTemplate.inputModalities,
+    outputModalities: nextTemplate.outputModalities,
+    abilities: nextTemplate.abilities,
+    tools: nextTemplate.tools,
     customHeaders: [],
     customBodies: [],
   };
@@ -454,7 +716,9 @@ function buildPresetProvider(preset: ProviderPreset): AnyRecord {
 }
 
 function hasBuiltInTool(model: AnyRecord, toolType: string): boolean {
-  return ensureArray<AnyRecord>(model.tools).some((tool) => getString(tool.type).toLowerCase() === toolType.toLowerCase());
+  return ensureArray<AnyRecord>(model.tools).some(
+    (tool) => getString(tool.type).toLowerCase() === toolType.toLowerCase(),
+  );
 }
 
 function toggleItem(values: string[], item: string, enabled: boolean): string[] {
@@ -466,15 +730,13 @@ function toggleItem(values: string[], item: string, enabled: boolean): string[] 
 }
 
 function upsertModelTool(model: AnyRecord, toolType: string, enabled: boolean): AnyRecord[] {
-  const tools = ensureArray<AnyRecord>(model.tools).filter((tool) => getString(tool.type) !== toolType);
+  const tools = ensureArray<AnyRecord>(model.tools).filter(
+    (tool) => getString(tool.type) !== toolType,
+  );
   if (enabled) {
     tools.push({ type: toolType });
   }
   return tools;
-}
-
-function normalizeModelRef(value: unknown): string {
-  return getString(value).trim().toLowerCase();
 }
 
 function modelAliasesFromValue(value: unknown): string[] {
@@ -548,7 +810,10 @@ function providerKey(provider: AnyRecord, index: number): string {
   return getString(provider.id) || `provider-${index}`;
 }
 
-function buildNextSettings(current: AnyRecord | null, mutator: (next: AnyRecord) => void): AnyRecord {
+function buildNextSettings(
+  current: AnyRecord | null,
+  mutator: (next: AnyRecord) => void,
+): AnyRecord {
   const next = current ? deepClone(current) : {};
   mutator(next);
   return next;
@@ -694,7 +959,9 @@ export default function SettingsProvidersPage() {
     : "auto";
 
   const currentProviderId = currentProvider ? getString(currentProvider.id) : "";
-  const currentProviderType = currentProvider ? normalizeProviderType(currentProvider.type) : "openai";
+  const currentProviderType = currentProvider
+    ? normalizeProviderType(currentProvider.type)
+    : "openai";
   const currentFetchState = currentProviderId ? fetchStates[currentProviderId] : undefined;
   const chatModels = React.useMemo(
     () => currentModels.filter((model) => normalizeModelType(model.type) === "CHAT"),
@@ -728,7 +995,7 @@ export default function SettingsProvidersPage() {
         }
       } catch (error) {
         console.error("settings/replace failed", error);
-        toast.error(error instanceof Error ? error.message : options?.errorMessage ?? "保存失败");
+        toast.error(error instanceof Error ? error.message : (options?.errorMessage ?? "保存失败"));
       } finally {
         setBusy(false);
       }
@@ -758,10 +1025,13 @@ export default function SettingsProvidersPage() {
     await persistSettings(next, { successMessage: "设置已保存", clearDirty: true });
   }, [persistSettings]);
 
-  const updateConfigOnly = React.useCallback((mutator: (next: AnyRecord) => void) => {
-    buildLatestDraft(mutator);
-    setDirty(true);
-  }, [buildLatestDraft]);
+  const updateConfigOnly = React.useCallback(
+    (mutator: (next: AnyRecord) => void) => {
+      buildLatestDraft(mutator);
+      setDirty(true);
+    },
+    [buildLatestDraft],
+  );
 
   const updateTitleModel = React.useCallback(
     (modelId: string) => {
@@ -942,13 +1212,21 @@ export default function SettingsProvidersPage() {
   const completePresetProviders = React.useCallback(() => {
     const next = buildLatestDraft((settingsDraft) => {
       const nextProviders = ensureArray<AnyRecord>(settingsDraft.providers);
-      const existingPresetKeys = new Set(nextProviders.map((provider) => getString(provider.presetKey)).filter(Boolean));
+      const existingPresetKeys = new Set(
+        nextProviders.map((provider) => getString(provider.presetKey)).filter(Boolean),
+      );
       const existingBaseUrls = new Set(
-        nextProviders.map((provider) => getString(provider.baseUrl).trim().toLowerCase()).filter(Boolean),
+        nextProviders
+          .map((provider) => getString(provider.baseUrl).trim().toLowerCase())
+          .filter(Boolean),
       );
 
       PROVIDER_PRESETS.forEach((preset) => {
-        if (existingPresetKeys.has(preset.key) || existingBaseUrls.has(preset.baseUrl.toLowerCase())) return;
+        if (
+          existingPresetKeys.has(preset.key) ||
+          existingBaseUrls.has(preset.baseUrl.toLowerCase())
+        )
+          return;
         nextProviders.push(buildPresetProvider(preset));
       });
 
@@ -1039,7 +1317,10 @@ export default function SettingsProvidersPage() {
       setFetchState(providerId, (state) => ({ ...state, loading: true, error: null }));
       try {
         const requestBody: FetchProviderModelsRequestDto = { providerId };
-        const response = await api.post<FetchProviderModelsResponseDto>("settings/provider/models/fetch", requestBody);
+        const response = await api.post<FetchProviderModelsResponseDto>(
+          "settings/provider/models/fetch",
+          requestBody,
+        );
         const existingIds = new Set(
           ensureArray<AnyRecord>(provider.models)
             .flatMap((model) => modelAliases(model))
@@ -1048,7 +1329,9 @@ export default function SettingsProvidersPage() {
 
         const selected: Record<string, boolean> = {};
         response.models.forEach((model) => {
-          selected[model.modelId] = fetchedModelAliases(model).some((value) => existingIds.has(value));
+          selected[model.modelId] = fetchedModelAliases(model).some((value) =>
+            existingIds.has(value),
+          );
         });
 
         setFetchState(providerId, () => ({
@@ -1100,7 +1383,9 @@ export default function SettingsProvidersPage() {
     ? Object.values(currentFetchState.selected).filter(Boolean).length
     : 0;
   const visibleSelectedFetchedCount = React.useMemo(
-    () => filteredFetchedModels.filter((model) => Boolean(currentFetchState?.selected[model.modelId])).length,
+    () =>
+      filteredFetchedModels.filter((model) => Boolean(currentFetchState?.selected[model.modelId]))
+        .length,
     [currentFetchState?.selected, filteredFetchedModels],
   );
 
@@ -1114,7 +1399,13 @@ export default function SettingsProvidersPage() {
       });
       return { ...state, selected };
     });
-  }, [currentFetchState, currentProviderId, filteredFetchedModels, setFetchState, visibleSelectedFetchedCount]);
+  }, [
+    currentFetchState,
+    currentProviderId,
+    filteredFetchedModels,
+    setFetchState,
+    visibleSelectedFetchedCount,
+  ]);
 
   const importFetchedModels = React.useCallback(
     async (providerIndex: number) => {
@@ -1154,12 +1445,29 @@ export default function SettingsProvidersPage() {
 
         const nextModels = ensureArray<AnyRecord>(target.models);
         importable.forEach((item) => {
+          const template = modelTemplateFromLibrary(draftRef.current, item.modelId, {
+            abilities: ["TOOL"],
+            tools: [],
+            inputModalities: ["TEXT"],
+            outputModalities: ["TEXT"],
+          });
           nextModels.push(
-            buildDefaultModel({
-              modelId: item.modelId,
-              displayName: item.displayName,
-              type: item.type,
-            }),
+            buildDefaultModel(
+              {
+                modelId: item.modelId,
+                displayName: item.displayName,
+                type: item.type,
+              },
+              template,
+            ),
+          );
+          settingsDraft.modelLibrary = syncModelAbilitiesToLibrary(
+            readModelLibrary(settingsDraft),
+            normalizeModelRef(item.modelId),
+            template.abilities,
+            template.tools,
+            normalizeModalityList(template.inputModalities),
+            normalizeModalityList(template.outputModalities),
           );
         });
 
@@ -1222,10 +1530,17 @@ export default function SettingsProvidersPage() {
         const provider = nextProviders[providerIndex];
         if (!provider) return;
 
+        const removedModel = ensureArray<AnyRecord>(provider.models)[modelIndex];
+        const removedRef = normalizeModelRef(removedModel?.modelId);
         const nextModels = ensureArray<AnyRecord>(provider.models);
         nextModels.splice(modelIndex, 1);
         nextProviders[providerIndex] = { ...provider, models: nextModels };
         settingsDraft.providers = nextProviders;
+        settingsDraft.modelLibrary = removeModelLibraryIfUnused(
+          readModelLibrary(settingsDraft),
+          nextProviders,
+          removedRef,
+        );
       });
 
       if (editingModelIndex === modelIndex) {
@@ -1237,14 +1552,17 @@ export default function SettingsProvidersPage() {
     [autosaveSettings, buildLatestDraft, confirm, editingModelIndex],
   );
 
-  const openModelEditor = React.useCallback((modelIndex: number) => {
-    const model = currentModels[modelIndex];
-    if (!model) return;
+  const openModelEditor = React.useCallback(
+    (modelIndex: number) => {
+      const model = currentModels[modelIndex];
+      if (!model) return;
 
-    setDraftModel(deepClone(model));
-    setEditingModelIndex(modelIndex);
-    setModelEditorTab("basic");
-  }, [currentModels]);
+      setDraftModel(deepClone(model));
+      setEditingModelIndex(modelIndex);
+      setModelEditorTab("basic");
+    },
+    [currentModels],
+  );
 
   const closeModelEditor = React.useCallback(() => {
     setEditingModelIndex(null);
@@ -1270,14 +1588,43 @@ export default function SettingsProvidersPage() {
       return;
     }
 
+    const nextModel = deepClone(model);
+    const nextRef = normalizeModelRef(nextModel.modelId);
+    const sourceRef = normalizeModelRef(sourceModel?.modelId);
+    nextModel.abilities = ensureStringValues(nextModel.abilities);
+    nextModel.inputModalities = normalizeModalityList(nextModel.inputModalities);
+    nextModel.outputModalities = normalizeModalityList(nextModel.outputModalities);
+    if (!getBoolean(nextModel.imageGenerationMode, false) || !nextModel.outputModalities.includes("IMAGE")) {
+      nextModel.imageGenerationMode = false;
+    }
+    nextModel.tools = normalizeToolList(nextModel.tools);
+
     const next = buildLatestDraft((settingsDraft) => {
       const nextProviders = ensureArray<AnyRecord>(settingsDraft.providers);
       const provider = nextProviders[currentProviderIndex];
       if (!provider) return;
 
       const nextModels = ensureArray<AnyRecord>(provider.models);
-      nextModels[editingModelIndex] = deepClone(model);
+      nextModels[editingModelIndex] = nextModel;
       nextProviders[currentProviderIndex] = { ...provider, models: nextModels };
+      syncModelRefAcrossProviders(
+        settingsDraft,
+        nextRef,
+        ensureStringValues(nextModel.abilities),
+        normalizeToolList(nextModel.tools),
+        normalizeModalityList(nextModel.inputModalities),
+        normalizeModalityList(nextModel.outputModalities),
+      );
+
+      const library = syncModelAbilitiesToLibrary(
+        readModelLibrary(settingsDraft),
+        nextRef,
+        ensureStringValues(nextModel.abilities),
+        normalizeToolList(nextModel.tools),
+        normalizeModalityList(nextModel.inputModalities),
+        normalizeModalityList(nextModel.outputModalities),
+      );
+      settingsDraft.modelLibrary = removeModelLibraryIfUnused(library, nextProviders, sourceRef);
       settingsDraft.providers = nextProviders;
     });
 
@@ -1293,14 +1640,19 @@ export default function SettingsProvidersPage() {
     editingModelIndex,
   ]);
 
-  const editingModel = editingModelIndex === null ? null : draftModel ?? currentModels[editingModelIndex] ?? null;
+  const editingModel =
+    editingModelIndex === null ? null : (draftModel ?? currentModels[editingModelIndex] ?? null);
 
   const patchDraftModel = React.useCallback((patch: Partial<AnyRecord>) => {
     setDraftModel((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
 
   const updateDraftModelArrayField = React.useCallback(
-    (field: "inputModalities" | "outputModalities" | "abilities", item: string, enabled: boolean) => {
+    (
+      field: "inputModalities" | "outputModalities" | "abilities",
+      item: string,
+      enabled: boolean,
+    ) => {
       setDraftModel((prev) => {
         if (!prev) return prev;
         const currentValues = ensureArray<string>(prev[field]);
@@ -1315,15 +1667,18 @@ export default function SettingsProvidersPage() {
     [],
   );
 
-  const updateDraftModelTool = React.useCallback((toolType: "search" | "url_context", enabled: boolean) => {
-    setDraftModel((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        tools: upsertModelTool(prev, toolType, enabled),
-      };
-    });
-  }, []);
+  const updateDraftModelTool = React.useCallback(
+    (toolType: "search" | "url_context", enabled: boolean) => {
+      setDraftModel((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          tools: upsertModelTool(prev, toolType, enabled),
+        };
+      });
+    },
+    [],
+  );
 
   const updateDraftModelEntry = React.useCallback(
     (field: "customHeaders" | "customBodies", index: number, patch: Partial<AnyRecord>) => {
@@ -1348,14 +1703,17 @@ export default function SettingsProvidersPage() {
     });
   }, []);
 
-  const removeDraftModelEntry = React.useCallback((field: "customHeaders" | "customBodies", index: number) => {
-    setDraftModel((prev) => {
-      if (!prev) return prev;
-      const items = ensureArray<AnyRecord>(prev[field]);
-      items.splice(index, 1);
-      return { ...prev, [field]: items };
-    });
-  }, []);
+  const removeDraftModelEntry = React.useCallback(
+    (field: "customHeaders" | "customBodies", index: number) => {
+      setDraftModel((prev) => {
+        if (!prev) return prev;
+        const items = ensureArray<AnyRecord>(prev[field]);
+        items.splice(index, 1);
+        return { ...prev, [field]: items };
+      });
+    },
+    [],
+  );
 
   const openTestDialog = React.useCallback(() => {
     if (!currentProviderId || !currentProvider) return;
@@ -1384,10 +1742,13 @@ export default function SettingsProvidersPage() {
 
     setTestDialog((prev) => ({ ...prev, testing: true, result: null }));
     try {
-      const response = await api.post<ProviderModelTestResponseDto>("settings/provider/model/test", {
-        providerId: currentProviderId,
-        modelId: testDialog.selectedModelId,
-      });
+      const response = await api.post<ProviderModelTestResponseDto>(
+        "settings/provider/model/test",
+        {
+          providerId: currentProviderId,
+          modelId: testDialog.selectedModelId,
+        },
+      );
       setTestDialog((prev) => ({ ...prev, testing: false, result: response }));
       toast.success("测试完成");
     } catch (error) {
@@ -1443,7 +1804,11 @@ export default function SettingsProvidersPage() {
                       提供商
                     </Button>
 
-                    <AIIcon name={getString(currentProvider.name, "Provider")} size={30} className="rounded-lg" />
+                    <AIIcon
+                      name={getString(currentProvider.name, "Provider")}
+                      size={30}
+                      className="rounded-lg"
+                    />
 
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1460,12 +1825,15 @@ export default function SettingsProvidersPage() {
                           {currentProvider.enabled !== false ? "已启用" : "已停用"}
                         </Badge>
                         {dirty ? (
-                          <span className="text-xs text-muted-foreground">{busy ? "正在保存..." : "有未保存修改"}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {busy ? "正在保存..." : "有未保存修改"}
+                          </span>
                         ) : null}
                       </div>
                       <div className="truncate text-xs text-muted-foreground">
                         {providerHost(currentProvider.baseUrl)} · {currentModels.length} 个模型 ·{" "}
-                        {currentModels.filter((model) => isChatSelectableModel(model)).length} 个可聊天
+                        {currentModels.filter((model) => isChatSelectableModel(model)).length}{" "}
+                        个可聊天
                       </div>
                     </div>
                   </div>
@@ -1474,7 +1842,9 @@ export default function SettingsProvidersPage() {
                     <button
                       type="button"
                       className={`flex h-10 items-center justify-center gap-2 rounded-lg text-sm transition ${
-                        providerTab === "config" ? "bg-background font-medium shadow-sm" : "text-muted-foreground hover:text-foreground"
+                        providerTab === "config"
+                          ? "bg-background font-medium shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
                       }`}
                       onClick={() => setProviderTab("config")}
                     >
@@ -1484,7 +1854,9 @@ export default function SettingsProvidersPage() {
                     <button
                       type="button"
                       className={`flex h-10 items-center justify-center gap-2 rounded-lg text-sm transition ${
-                        providerTab === "models" ? "bg-background font-medium shadow-sm" : "text-muted-foreground hover:text-foreground"
+                        providerTab === "models"
+                          ? "bg-background font-medium shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
                       }`}
                       onClick={() => setProviderTab("models")}
                     >
@@ -1512,7 +1884,9 @@ export default function SettingsProvidersPage() {
                             <div className="mb-1 text-xs font-medium">名称</div>
                             <Input
                               value={getString(currentProvider.name)}
-                              onChange={(event) => updateProvider(currentProviderIndex, { name: event.target.value })}
+                              onChange={(event) =>
+                                updateProvider(currentProviderIndex, { name: event.target.value })
+                              }
                               disabled={busy}
                             />
                           </div>
@@ -1526,7 +1900,9 @@ export default function SettingsProvidersPage() {
                             ) : (
                               <Select
                                 value={currentProviderType}
-                                onValueChange={(value) => updateProviderType(currentProviderIndex, value as ProviderType)}
+                                onValueChange={(value) =>
+                                  updateProviderType(currentProviderIndex, value as ProviderType)
+                                }
                               >
                                 <SelectTrigger className="w-full">
                                   <SelectValue />
@@ -1547,7 +1923,9 @@ export default function SettingsProvidersPage() {
                               <span className="text-xs font-medium">启用</span>
                               <Switch
                                 checked={currentProvider.enabled !== false}
-                                onCheckedChange={(checked) => updateProvider(currentProviderIndex, { enabled: checked })}
+                                onCheckedChange={(checked) =>
+                                  updateProvider(currentProviderIndex, { enabled: checked })
+                                }
                                 disabled={busy}
                               />
                             </div>
@@ -1557,7 +1935,11 @@ export default function SettingsProvidersPage() {
                             <div className="mb-1 text-xs font-medium">API Base URL</div>
                             <Input
                               value={getString(currentProvider.baseUrl)}
-                              onChange={(event) => updateProvider(currentProviderIndex, { baseUrl: event.target.value })}
+                              onChange={(event) =>
+                                updateProvider(currentProviderIndex, {
+                                  baseUrl: event.target.value,
+                                })
+                              }
                               disabled={busy}
                             />
                           </div>
@@ -1569,7 +1951,11 @@ export default function SettingsProvidersPage() {
                                 className="min-w-0 flex-1"
                                 type={showSecrets ? "text" : "password"}
                                 value={getString(currentProvider.apiKey)}
-                                onChange={(event) => updateProvider(currentProviderIndex, { apiKey: event.target.value })}
+                                onChange={(event) =>
+                                  updateProvider(currentProviderIndex, {
+                                    apiKey: event.target.value,
+                                  })
+                                }
                                 disabled={busy}
                                 autoComplete="off"
                               />
@@ -1582,7 +1968,11 @@ export default function SettingsProvidersPage() {
                                 title={showSecrets ? "隐藏密钥" : "显示密钥"}
                                 aria-label={showSecrets ? "隐藏密钥" : "显示密钥"}
                               >
-                                {showSecrets ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                                {showSecrets ? (
+                                  <EyeOff className="size-4" />
+                                ) : (
+                                  <Eye className="size-4" />
+                                )}
                               </Button>
                             </div>
                           </div>
@@ -1593,9 +1983,14 @@ export default function SettingsProvidersPage() {
                                 <div>
                                   <div className="mb-1 text-xs font-medium">API 路径</div>
                                   <Input
-                                    value={getString(currentProvider.chatCompletionsPath, "/chat/completions")}
+                                    value={getString(
+                                      currentProvider.chatCompletionsPath,
+                                      "/chat/completions",
+                                    )}
                                     onChange={(event) =>
-                                      updateProvider(currentProviderIndex, { chatCompletionsPath: event.target.value })
+                                      updateProvider(currentProviderIndex, {
+                                        chatCompletionsPath: event.target.value,
+                                      })
                                     }
                                     disabled={busy || currentProvider.builtIn === true}
                                   />
@@ -1612,7 +2007,9 @@ export default function SettingsProvidersPage() {
                                 <Switch
                                   checked={getBoolean(currentProvider.useResponseApi)}
                                   onCheckedChange={(checked) =>
-                                    updateProvider(currentProviderIndex, { useResponseApi: checked })
+                                    updateProvider(currentProviderIndex, {
+                                      useResponseApi: checked,
+                                    })
                                   }
                                   disabled={busy}
                                 />
@@ -1625,7 +2022,9 @@ export default function SettingsProvidersPage() {
                               <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2">
                                 <div>
                                   <div className="text-xs font-medium">Vertex AI</div>
-                                  <div className="mt-0.5 text-xs text-muted-foreground">开启 Google Vertex AI 模式。</div>
+                                  <div className="mt-0.5 text-xs text-muted-foreground">
+                                    开启 Google Vertex AI 模式。
+                                  </div>
                                 </div>
                                 <Switch
                                   checked={getBoolean(currentProvider.vertexAI)}
@@ -1641,12 +2040,16 @@ export default function SettingsProvidersPage() {
                                   <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2">
                                     <div>
                                       <div className="text-xs font-medium">服务账号认证</div>
-                                      <div className="mt-0.5 text-xs text-muted-foreground">使用 service account 字段。</div>
+                                      <div className="mt-0.5 text-xs text-muted-foreground">
+                                        使用 service account 字段。
+                                      </div>
                                     </div>
                                     <Switch
                                       checked={getBoolean(currentProvider.useServiceAccount)}
                                       onCheckedChange={(checked) =>
-                                        updateProvider(currentProviderIndex, { useServiceAccount: checked })
+                                        updateProvider(currentProviderIndex, {
+                                          useServiceAccount: checked,
+                                        })
                                       }
                                       disabled={busy}
                                     />
@@ -1657,7 +2060,9 @@ export default function SettingsProvidersPage() {
                                     <Input
                                       value={getString(currentProvider.projectId)}
                                       onChange={(event) =>
-                                        updateProvider(currentProviderIndex, { projectId: event.target.value })
+                                        updateProvider(currentProviderIndex, {
+                                          projectId: event.target.value,
+                                        })
                                       }
                                       disabled={busy}
                                     />
@@ -1668,18 +2073,24 @@ export default function SettingsProvidersPage() {
                                     <Input
                                       value={getString(currentProvider.location, "us-central1")}
                                       onChange={(event) =>
-                                        updateProvider(currentProviderIndex, { location: event.target.value })
+                                        updateProvider(currentProviderIndex, {
+                                          location: event.target.value,
+                                        })
                                       }
                                       disabled={busy}
                                     />
                                   </div>
 
                                   <div className="md:col-span-2">
-                                    <div className="mb-1 text-xs font-medium">Service Account Email</div>
+                                    <div className="mb-1 text-xs font-medium">
+                                      Service Account Email
+                                    </div>
                                     <Input
                                       value={getString(currentProvider.serviceAccountEmail)}
                                       onChange={(event) =>
-                                        updateProvider(currentProviderIndex, { serviceAccountEmail: event.target.value })
+                                        updateProvider(currentProviderIndex, {
+                                          serviceAccountEmail: event.target.value,
+                                        })
                                       }
                                       disabled={busy}
                                     />
@@ -1691,7 +2102,9 @@ export default function SettingsProvidersPage() {
                                       type={showSecrets ? "text" : "password"}
                                       value={getString(currentProvider.privateKey)}
                                       onChange={(event) =>
-                                        updateProvider(currentProviderIndex, { privateKey: event.target.value })
+                                        updateProvider(currentProviderIndex, {
+                                          privateKey: event.target.value,
+                                        })
                                       }
                                       disabled={busy}
                                       autoComplete="off"
@@ -1706,7 +2119,9 @@ export default function SettingsProvidersPage() {
                             <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2">
                               <div>
                                 <div className="text-xs font-medium">Prompt Caching</div>
-                                <div className="mt-0.5 text-xs text-muted-foreground">Claude 提示词缓存。</div>
+                                <div className="mt-0.5 text-xs text-muted-foreground">
+                                  Claude 提示词缓存。
+                                </div>
                               </div>
                               <Switch
                                 checked={getBoolean(currentProvider.promptCaching)}
@@ -1724,7 +2139,9 @@ export default function SettingsProvidersPage() {
                         {(() => {
                           const proxy = readProxy(currentProvider);
                           const enabled = proxy.type !== "none";
-                          const proxyLabel = PROXY_TYPES.find((item) => item.value === proxy.type)?.label ?? "不使用代理";
+                          const proxyLabel =
+                            PROXY_TYPES.find((item) => item.value === proxy.type)?.label ??
+                            "不使用代理";
                           return (
                             <>
                               <div className="flex items-center justify-between gap-2 px-3 py-2">
@@ -1733,15 +2150,21 @@ export default function SettingsProvidersPage() {
                                   className="flex min-w-0 flex-1 items-center gap-2 text-left"
                                   onClick={() => setProxyCollapsed((value) => !value)}
                                 >
-                                  <ChevronRight className={`size-4 shrink-0 transition-transform ${proxyCollapsed ? "" : "rotate-90"}`} />
+                                  <ChevronRight
+                                    className={`size-4 shrink-0 transition-transform ${proxyCollapsed ? "" : "rotate-90"}`}
+                                  />
                                   <Network className="size-4 shrink-0" />
                                   <span className="truncate text-sm font-semibold">供应商代理</span>
-                                  <span className="truncate text-xs text-muted-foreground">{enabled ? proxyLabel : "直连"}</span>
+                                  <span className="truncate text-xs text-muted-foreground">
+                                    {enabled ? proxyLabel : "直连"}
+                                  </span>
                                 </button>
                                 <Switch
                                   checked={enabled}
                                   onCheckedChange={(checked) =>
-                                    updateProviderProxy(currentProviderIndex, { type: checked ? "http" : "none" })
+                                    updateProviderProxy(currentProviderIndex, {
+                                      type: checked ? "http" : "none",
+                                    })
                                   }
                                   disabled={busy}
                                 />
@@ -1754,7 +2177,9 @@ export default function SettingsProvidersPage() {
                                     <Select
                                       value={proxy.type}
                                       onValueChange={(value) =>
-                                        updateProviderProxy(currentProviderIndex, { type: value as ProxyType })
+                                        updateProviderProxy(currentProviderIndex, {
+                                          type: value as ProxyType,
+                                        })
                                       }
                                       disabled={busy}
                                     >
@@ -1778,7 +2203,9 @@ export default function SettingsProvidersPage() {
                                         <Input
                                           value={proxy.address}
                                           onChange={(event) =>
-                                            updateProviderProxy(currentProviderIndex, { address: event.target.value })
+                                            updateProviderProxy(currentProviderIndex, {
+                                              address: event.target.value,
+                                            })
                                           }
                                           disabled={busy}
                                           placeholder="127.0.0.1"
@@ -1805,7 +2232,9 @@ export default function SettingsProvidersPage() {
                                         <Input
                                           value={proxy.username}
                                           onChange={(event) =>
-                                            updateProviderProxy(currentProviderIndex, { username: event.target.value })
+                                            updateProviderProxy(currentProviderIndex, {
+                                              username: event.target.value,
+                                            })
                                           }
                                           disabled={busy}
                                         />
@@ -1817,7 +2246,9 @@ export default function SettingsProvidersPage() {
                                           type={showSecrets ? "text" : "password"}
                                           value={proxy.password}
                                           onChange={(event) =>
-                                            updateProviderProxy(currentProviderIndex, { password: event.target.value })
+                                            updateProviderProxy(currentProviderIndex, {
+                                              password: event.target.value,
+                                            })
                                           }
                                           disabled={busy}
                                           autoComplete="off"
@@ -1825,7 +2256,9 @@ export default function SettingsProvidersPage() {
                                       </div>
                                     </>
                                   ) : (
-                                    <div className="flex items-end text-xs text-muted-foreground">当前直连，不使用代理。</div>
+                                    <div className="flex items-end text-xs text-muted-foreground">
+                                      当前直连，不使用代理。
+                                    </div>
                                   )}
                                 </div>
                               )}
@@ -1845,7 +2278,9 @@ export default function SettingsProvidersPage() {
                                   className="flex min-w-0 flex-1 items-center gap-2 text-left"
                                   onClick={() => setBalanceCollapsed((value) => !value)}
                                 >
-                                  <ChevronRight className={`size-4 shrink-0 transition-transform ${balanceCollapsed ? "" : "rotate-90"}`} />
+                                  <ChevronRight
+                                    className={`size-4 shrink-0 transition-transform ${balanceCollapsed ? "" : "rotate-90"}`}
+                                  />
                                   <WalletCards className="size-4 shrink-0" />
                                   <span className="truncate text-sm font-semibold">余额 API</span>
                                   <span className="truncate text-xs text-muted-foreground">
@@ -1866,11 +2301,15 @@ export default function SettingsProvidersPage() {
                                   {balanceOption.enabled ? (
                                     <>
                                       <div>
-                                        <div className="mb-1 text-xs font-medium">余额 API 路径</div>
+                                        <div className="mb-1 text-xs font-medium">
+                                          余额 API 路径
+                                        </div>
                                         <Input
                                           value={balanceOption.apiPath}
                                           onChange={(event) =>
-                                            updateBalanceOption(currentProviderIndex, { apiPath: event.target.value })
+                                            updateBalanceOption(currentProviderIndex, {
+                                              apiPath: event.target.value,
+                                            })
                                           }
                                           disabled={busy}
                                           placeholder="/credits"
@@ -1878,11 +2317,15 @@ export default function SettingsProvidersPage() {
                                       </div>
 
                                       <div>
-                                        <div className="mb-1 text-xs font-medium">结果 JSON 路径</div>
+                                        <div className="mb-1 text-xs font-medium">
+                                          结果 JSON 路径
+                                        </div>
                                         <Input
                                           value={balanceOption.resultPath}
                                           onChange={(event) =>
-                                            updateBalanceOption(currentProviderIndex, { resultPath: event.target.value })
+                                            updateBalanceOption(currentProviderIndex, {
+                                              resultPath: event.target.value,
+                                            })
                                           }
                                           disabled={busy}
                                           placeholder="data.total_usage"
@@ -1913,7 +2356,13 @@ export default function SettingsProvidersPage() {
                           测试连接
                         </Button>
 
-                        <Button type="button" variant="default" size="sm" onClick={() => void saveCurrentDraft()} disabled={busy || !draft}>
+                        <Button
+                          type="button"
+                          variant="default"
+                          size="sm"
+                          onClick={() => void saveCurrentDraft()}
+                          disabled={busy || !draft}
+                        >
                           <Save className="size-4" />
                           保存
                         </Button>
@@ -1949,7 +2398,9 @@ export default function SettingsProvidersPage() {
                         <div className="flex min-w-0 flex-1 items-center gap-2">
                           <Package className="size-4 shrink-0" />
                           <span className="truncate text-sm font-semibold">模型</span>
-                          <span className="truncate text-xs text-muted-foreground">{currentModels.length} 个已添加</span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {currentModels.length} 个已添加
+                          </span>
                         </div>
 
                         <Button
@@ -1983,24 +2434,37 @@ export default function SettingsProvidersPage() {
                           导入已选 ({selectedFetchedCount})
                         </Button>
 
-                        <Button type="button" variant="default" size="sm" onClick={() => addModel(currentProviderIndex)} disabled={busy}>
+                        <Button
+                          type="button"
+                          variant="default"
+                          size="sm"
+                          onClick={() => addModel(currentProviderIndex)}
+                          disabled={busy}
+                        >
                           <Plus className="size-4" />
                           添加新模型
                         </Button>
                       </div>
 
-                      {currentFetchState?.error ? <div className="text-xs text-destructive">{currentFetchState.error}</div> : null}
+                      {currentFetchState?.error ? (
+                        <div className="text-xs text-destructive">{currentFetchState.error}</div>
+                      ) : null}
 
                       {currentModels.length === 0 ? (
                         <div className="rounded-xl border border-dashed p-10 text-center">
                           <Package className="mx-auto size-8 text-muted-foreground" />
                           <div className="mt-3 text-sm font-medium">暂无模型</div>
-                          <div className="mt-1 text-xs text-muted-foreground">点击上方按钮获取或添加模型。</div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            点击上方按钮获取或添加模型。
+                          </div>
                         </div>
                       ) : (
                         <div className="grid min-w-0 gap-3 md:grid-cols-2">
                           {currentModels.map((model, modelIndex) => {
-                            const title = getString(model.displayName, getString(model.modelId, "(未命名模型)"));
+                            const title = getString(
+                              model.displayName,
+                              getString(model.modelId, "(未命名模型)"),
+                            );
                             const type = normalizeModelType(model.type);
                             const inputModalities = ensureArray<string>(model.inputModalities);
                             const outputModalities = ensureArray<string>(model.outputModalities);
@@ -2017,9 +2481,18 @@ export default function SettingsProvidersPage() {
                             ];
 
                             return (
-                              <div key={getString(model.id) || `${getString(model.modelId)}-${modelIndex}`} className="min-w-0 overflow-hidden rounded-lg border bg-card p-3 shadow-sm">
+                              <div
+                                key={
+                                  getString(model.id) || `${getString(model.modelId)}-${modelIndex}`
+                                }
+                                className="min-w-0 overflow-hidden rounded-lg border bg-card p-3 shadow-sm"
+                              >
                                 <div className="flex items-start gap-2.5">
-                                  <AIIcon name={getString(model.modelId, title)} size={32} className="rounded-lg" />
+                                  <AIIcon
+                                    name={getString(model.modelId, title)}
+                                    size={32}
+                                    className="rounded-lg"
+                                  />
                                   <div className="min-w-0 flex-1">
                                     <div className="flex min-w-0 items-center gap-2">
                                       <div className="truncate text-sm font-semibold">{title}</div>
@@ -2055,7 +2528,9 @@ export default function SettingsProvidersPage() {
                                       type="button"
                                       variant="ghost"
                                       size="icon-xs"
-                                      onClick={() => void deleteModel(currentProviderIndex, modelIndex)}
+                                      onClick={() =>
+                                        void deleteModel(currentProviderIndex, modelIndex)
+                                      }
                                       disabled={busy}
                                       title="删除模型"
                                       aria-label="删除模型"
@@ -2113,7 +2588,10 @@ export default function SettingsProvidersPage() {
                           <div className="flex items-center justify-between gap-3">
                             <div className="flex min-w-0 items-center gap-3">
                               <AIIcon
-                                name={getString(editingModel.modelId, getString(editingModel.displayName, "Model"))}
+                                name={getString(
+                                  editingModel.modelId,
+                                  getString(editingModel.displayName, "Model"),
+                                )}
                                 size={36}
                                 className="rounded-lg"
                               />
@@ -2126,7 +2604,14 @@ export default function SettingsProvidersPage() {
                                 </SheetDescription>
                               </div>
                             </div>
-                            <Button type="button" variant="ghost" size="icon-sm" onClick={closeModelEditor} title="关闭" aria-label="关闭">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={closeModelEditor}
+                              title="关闭"
+                              aria-label="关闭"
+                            >
                               <X className="size-4" />
                             </Button>
                           </div>
@@ -2162,7 +2647,9 @@ export default function SettingsProvidersPage() {
                                     <div className="mb-1 text-xs font-medium">模型 ID</div>
                                     <Input
                                       value={getString(editingModel.modelId)}
-                                      onChange={(event) => patchDraftModel({ modelId: event.target.value })}
+                                      onChange={(event) =>
+                                        patchDraftModel({ modelId: event.target.value })
+                                      }
                                       disabled={busy}
                                       placeholder="例如：gpt-4.1"
                                     />
@@ -2172,7 +2659,9 @@ export default function SettingsProvidersPage() {
                                     <div className="mb-1 text-xs font-medium">模型显示名称</div>
                                     <Input
                                       value={getString(editingModel.displayName)}
-                                      onChange={(event) => patchDraftModel({ displayName: event.target.value })}
+                                      onChange={(event) =>
+                                        patchDraftModel({ displayName: event.target.value })
+                                      }
                                       disabled={busy}
                                       placeholder="例如：GPT-4.1"
                                     />
@@ -2204,11 +2693,20 @@ export default function SettingsProvidersPage() {
                                     <div className="text-xs font-medium">输入模态</div>
                                     <div className="mt-3 flex flex-wrap gap-3">
                                       {(["TEXT", "IMAGE"] as ModelModality[]).map((item) => (
-                                        <label key={item} className="flex cursor-pointer items-center gap-2 text-sm">
+                                        <label
+                                          key={item}
+                                          className="flex cursor-pointer items-center gap-2 text-sm"
+                                        >
                                           <Checkbox
-                                            checked={ensureArray<string>(editingModel.inputModalities).includes(item)}
+                                            checked={ensureArray<string>(
+                                              editingModel.inputModalities,
+                                            ).includes(item)}
                                             onCheckedChange={(checked) =>
-                                              updateDraftModelArrayField("inputModalities", item, Boolean(checked))
+                                              updateDraftModelArrayField(
+                                                "inputModalities",
+                                                item,
+                                                Boolean(checked),
+                                              )
                                             }
                                           />
                                           <span>{modalityLabel(item)}</span>
@@ -2221,11 +2719,20 @@ export default function SettingsProvidersPage() {
                                     <div className="text-xs font-medium">输出模态</div>
                                     <div className="mt-3 flex flex-wrap gap-3">
                                       {(["TEXT", "IMAGE"] as ModelModality[]).map((item) => (
-                                        <label key={item} className="flex cursor-pointer items-center gap-2 text-sm">
+                                        <label
+                                          key={item}
+                                          className="flex cursor-pointer items-center gap-2 text-sm"
+                                        >
                                           <Checkbox
-                                            checked={ensureArray<string>(editingModel.outputModalities).includes(item)}
+                                            checked={ensureArray<string>(
+                                              editingModel.outputModalities,
+                                            ).includes(item)}
                                             onCheckedChange={(checked) =>
-                                              updateDraftModelArrayField("outputModalities", item, Boolean(checked))
+                                              updateDraftModelArrayField(
+                                                "outputModalities",
+                                                item,
+                                                Boolean(checked),
+                                              )
                                             }
                                           />
                                           <span>{modalityLabel(item)}</span>
@@ -2233,7 +2740,9 @@ export default function SettingsProvidersPage() {
                                       ))}
                                     </div>
 
-                                    {ensureArray<string>(editingModel.outputModalities).includes("IMAGE") ? (
+                                    {ensureArray<string>(editingModel.outputModalities).includes(
+                                      "IMAGE",
+                                    ) ? (
                                       <div className="mt-4 flex items-center justify-between gap-3 rounded-lg bg-muted/40 px-3 py-2">
                                         <div className="min-w-0">
                                           <div className="text-sm font-medium">生图模式</div>
@@ -2243,7 +2752,9 @@ export default function SettingsProvidersPage() {
                                         </div>
                                         <Switch
                                           checked={getBoolean(editingModel.imageGenerationMode)}
-                                          onCheckedChange={(checked) => patchDraftModel({ imageGenerationMode: checked })}
+                                          onCheckedChange={(checked) =>
+                                            patchDraftModel({ imageGenerationMode: checked })
+                                          }
                                           disabled={busy}
                                         />
                                       </div>
@@ -2256,11 +2767,20 @@ export default function SettingsProvidersPage() {
                                     <div className="text-xs font-medium">模型能力</div>
                                     <div className="mt-3 flex flex-wrap gap-3">
                                       {(["TOOL", "REASONING"] as ModelAbility[]).map((item) => (
-                                        <label key={item} className="flex cursor-pointer items-center gap-2 text-sm">
+                                        <label
+                                          key={item}
+                                          className="flex cursor-pointer items-center gap-2 text-sm"
+                                        >
                                           <Checkbox
-                                            checked={ensureArray<string>(editingModel.abilities).includes(item)}
+                                            checked={ensureArray<string>(
+                                              editingModel.abilities,
+                                            ).includes(item)}
                                             onCheckedChange={(checked) =>
-                                              updateDraftModelArrayField("abilities", item, Boolean(checked))
+                                              updateDraftModelArrayField(
+                                                "abilities",
+                                                item,
+                                                Boolean(checked),
+                                              )
                                             }
                                           />
                                           <span>{abilityLabel(item)}</span>
@@ -2295,45 +2815,57 @@ export default function SettingsProvidersPage() {
                                   </div>
 
                                   <div className="mt-4 space-y-2">
-                                    {ensureArray<AnyRecord>(editingModel.customHeaders).length === 0 ? (
+                                    {ensureArray<AnyRecord>(editingModel.customHeaders).length ===
+                                    0 ? (
                                       <div className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
                                         未设置自定义请求头。
                                       </div>
                                     ) : null}
 
-                                    {ensureArray<AnyRecord>(editingModel.customHeaders).map((item, index) => (
-                                      <div key={index} className="grid gap-2 rounded-lg border p-3">
-                                        <Input
-                                          value={getString(item.name)}
-                                          onChange={(event) =>
-                                            updateDraftModelEntry("customHeaders", index, { name: event.target.value })
-                                          }
-                                          disabled={busy}
-                                          placeholder="Header 名称"
-                                        />
-                                        <div className="flex gap-2">
+                                    {ensureArray<AnyRecord>(editingModel.customHeaders).map(
+                                      (item, index) => (
+                                        <div
+                                          key={index}
+                                          className="grid gap-2 rounded-lg border p-3"
+                                        >
                                           <Input
-                                            value={getString(item.value)}
+                                            value={getString(item.name)}
                                             onChange={(event) =>
-                                              updateDraftModelEntry("customHeaders", index, { value: event.target.value })
+                                              updateDraftModelEntry("customHeaders", index, {
+                                                name: event.target.value,
+                                              })
                                             }
                                             disabled={busy}
-                                            placeholder="Header 值"
+                                            placeholder="Header 名称"
                                           />
-                                          <Button
-                                            type="button"
-                                            variant="destructive"
-                                            size="icon-sm"
-                                            onClick={() => removeDraftModelEntry("customHeaders", index)}
-                                            disabled={busy}
-                                            title="删除请求头"
-                                            aria-label="删除请求头"
-                                          >
-                                            <Trash2 className="size-4" />
-                                          </Button>
+                                          <div className="flex gap-2">
+                                            <Input
+                                              value={getString(item.value)}
+                                              onChange={(event) =>
+                                                updateDraftModelEntry("customHeaders", index, {
+                                                  value: event.target.value,
+                                                })
+                                              }
+                                              disabled={busy}
+                                              placeholder="Header 值"
+                                            />
+                                            <Button
+                                              type="button"
+                                              variant="destructive"
+                                              size="icon-sm"
+                                              onClick={() =>
+                                                removeDraftModelEntry("customHeaders", index)
+                                              }
+                                              disabled={busy}
+                                              title="删除请求头"
+                                              aria-label="删除请求头"
+                                            >
+                                              <Trash2 className="size-4" />
+                                            </Button>
+                                          </div>
                                         </div>
-                                      </div>
-                                    ))}
+                                      ),
+                                    )}
                                   </div>
                                 </section>
 
@@ -2358,45 +2890,57 @@ export default function SettingsProvidersPage() {
                                   </div>
 
                                   <div className="mt-4 space-y-2">
-                                    {ensureArray<AnyRecord>(editingModel.customBodies).length === 0 ? (
+                                    {ensureArray<AnyRecord>(editingModel.customBodies).length ===
+                                    0 ? (
                                       <div className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
                                         未设置自定义请求体字段。
                                       </div>
                                     ) : null}
 
-                                    {ensureArray<AnyRecord>(editingModel.customBodies).map((item, index) => (
-                                      <div key={index} className="grid gap-2 rounded-lg border p-3">
-                                        <Input
-                                          value={getString(item.key)}
-                                          onChange={(event) =>
-                                            updateDraftModelEntry("customBodies", index, { key: event.target.value })
-                                          }
-                                          disabled={busy}
-                                          placeholder="字段名"
-                                        />
-                                        <div className="flex gap-2">
+                                    {ensureArray<AnyRecord>(editingModel.customBodies).map(
+                                      (item, index) => (
+                                        <div
+                                          key={index}
+                                          className="grid gap-2 rounded-lg border p-3"
+                                        >
                                           <Input
-                                            value={getString(item.value)}
+                                            value={getString(item.key)}
                                             onChange={(event) =>
-                                              updateDraftModelEntry("customBodies", index, { value: event.target.value })
+                                              updateDraftModelEntry("customBodies", index, {
+                                                key: event.target.value,
+                                              })
                                             }
                                             disabled={busy}
-                                            placeholder="字段值"
+                                            placeholder="字段名"
                                           />
-                                          <Button
-                                            type="button"
-                                            variant="destructive"
-                                            size="icon-sm"
-                                            onClick={() => removeDraftModelEntry("customBodies", index)}
-                                            disabled={busy}
-                                            title="删除请求体字段"
-                                            aria-label="删除请求体字段"
-                                          >
-                                            <Trash2 className="size-4" />
-                                          </Button>
+                                          <div className="flex gap-2">
+                                            <Input
+                                              value={getString(item.value)}
+                                              onChange={(event) =>
+                                                updateDraftModelEntry("customBodies", index, {
+                                                  value: event.target.value,
+                                                })
+                                              }
+                                              disabled={busy}
+                                              placeholder="字段值"
+                                            />
+                                            <Button
+                                              type="button"
+                                              variant="destructive"
+                                              size="icon-sm"
+                                              onClick={() =>
+                                                removeDraftModelEntry("customBodies", index)
+                                              }
+                                              disabled={busy}
+                                              title="删除请求体字段"
+                                              aria-label="删除请求体字段"
+                                            >
+                                              <Trash2 className="size-4" />
+                                            </Button>
+                                          </div>
                                         </div>
-                                      </div>
-                                    ))}
+                                      ),
+                                    )}
                                   </div>
                                 </section>
                               </div>
@@ -2416,14 +2960,21 @@ export default function SettingsProvidersPage() {
                                     description: "允许该模型读取 URL 上下文工具。",
                                   },
                                 ].map((item) => (
-                                  <div key={item.type} className="flex items-center justify-between gap-4 rounded-xl border p-4">
+                                  <div
+                                    key={item.type}
+                                    className="flex items-center justify-between gap-4 rounded-xl border p-4"
+                                  >
                                     <div className="min-w-0">
                                       <div className="text-sm font-semibold">{item.title}</div>
-                                      <div className="mt-1 text-xs text-muted-foreground">{item.description}</div>
+                                      <div className="mt-1 text-xs text-muted-foreground">
+                                        {item.description}
+                                      </div>
                                     </div>
                                     <Switch
                                       checked={hasBuiltInTool(editingModel, item.type)}
-                                      onCheckedChange={(checked) => updateDraftModelTool(item.type, checked)}
+                                      onCheckedChange={(checked) =>
+                                        updateDraftModelTool(item.type, checked)
+                                      }
                                       disabled={busy}
                                     />
                                   </div>
@@ -2434,7 +2985,11 @@ export default function SettingsProvidersPage() {
                         </ScrollArea>
 
                         <SheetFooter className="border-t px-4 py-3">
-                          <Button type="button" variant="outline" onClick={() => void saveModelEditor()}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => void saveModelEditor()}
+                          >
                             完成
                           </Button>
                         </SheetFooter>
@@ -2444,7 +2999,9 @@ export default function SettingsProvidersPage() {
                 </>
               ) : (
                 <>
-                  <section className={defaultsOnly ? "rounded-xl border bg-card p-4 shadow-sm" : "hidden"}>
+                  <section
+                    className={defaultsOnly ? "rounded-xl border bg-card p-4 shadow-sm" : "hidden"}
+                  >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-start gap-3">
                         <div className="rounded-lg border bg-muted/40 p-2">
@@ -2465,7 +3022,9 @@ export default function SettingsProvidersPage() {
                         title={defaultModelsCollapsed ? "展开默认模型" : "折叠默认模型"}
                         aria-label={defaultModelsCollapsed ? "展开默认模型" : "折叠默认模型"}
                       >
-                        <ChevronRight className={`size-4 transition-transform ${defaultModelsCollapsed ? "" : "rotate-90"}`} />
+                        <ChevronRight
+                          className={`size-4 transition-transform ${defaultModelsCollapsed ? "" : "rotate-90"}`}
+                        />
                       </Button>
                     </div>
 
@@ -2479,10 +3038,16 @@ export default function SettingsProvidersPage() {
                               size="icon-sm"
                               className="mt-0.5 h-6 w-6"
                               onClick={() => setTitleSummaryCollapsed((value) => !value)}
-                              title={titleSummaryCollapsed ? "展开标题总结模型" : "折叠标题总结模型"}
-                              aria-label={titleSummaryCollapsed ? "展开标题总结模型" : "折叠标题总结模型"}
+                              title={
+                                titleSummaryCollapsed ? "展开标题总结模型" : "折叠标题总结模型"
+                              }
+                              aria-label={
+                                titleSummaryCollapsed ? "展开标题总结模型" : "折叠标题总结模型"
+                              }
                             >
-                              <ChevronRight className={`size-4 transition-transform ${titleSummaryCollapsed ? "" : "rotate-90"}`} />
+                              <ChevronRight
+                                className={`size-4 transition-transform ${titleSummaryCollapsed ? "" : "rotate-90"}`}
+                              />
                             </Button>
                             <div className="min-w-0">
                               <div className="text-sm font-medium">标题总结模型</div>
@@ -2498,7 +3063,10 @@ export default function SettingsProvidersPage() {
                             <div className="mt-4 grid gap-3 md:grid-cols-2">
                               <div>
                                 <div className="mb-1 text-xs font-medium">模型</div>
-                                <Select value={titleModelSelectValue} onValueChange={updateTitleModel}>
+                                <Select
+                                  value={titleModelSelectValue}
+                                  onValueChange={updateTitleModel}
+                                >
                                   <SelectTrigger className="w-full">
                                     <SelectValue placeholder="选择模型" />
                                   </SelectTrigger>
@@ -2516,7 +3084,13 @@ export default function SettingsProvidersPage() {
                             <div className="mt-4">
                               <div className="mb-1 flex items-center justify-between gap-2 text-xs font-medium">
                                 <span>标题总结提示词</span>
-                                <Button type="button" variant="outline" size="sm" onClick={resetTitlePrompt} disabled={busy}>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={resetTitlePrompt}
+                                  disabled={busy}
+                                >
                                   重置提示词
                                 </Button>
                               </div>
@@ -2537,11 +3111,15 @@ export default function SettingsProvidersPage() {
                     )}
                   </section>
 
-                  <section className={defaultsOnly ? "hidden" : "rounded-xl border bg-card p-4 shadow-sm"}>
+                  <section
+                    className={defaultsOnly ? "hidden" : "rounded-xl border bg-card p-4 shadow-sm"}
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold">提供商</div>
-                        <div className="mt-1 text-xs text-muted-foreground">点击卡片进入配置与模型页。</div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          点击卡片进入配置与模型页。
+                        </div>
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
@@ -2569,11 +3147,20 @@ export default function SettingsProvidersPage() {
                           添加预设
                         </Button>
 
-                        <Button type="button" variant="outline" size="sm" onClick={completePresetProviders} disabled={busy}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={completePresetProviders}
+                          disabled={busy}
+                        >
                           补全原版预设
                         </Button>
 
-                        <Select value={addProviderType} onValueChange={(value) => setAddProviderType(value as ProviderType)}>
+                        <Select
+                          value={addProviderType}
+                          onValueChange={(value) => setAddProviderType(value as ProviderType)}
+                        >
                           <SelectTrigger className="w-40" size="sm">
                             <SelectValue />
                           </SelectTrigger>
@@ -2586,7 +3173,13 @@ export default function SettingsProvidersPage() {
                           </SelectContent>
                         </Select>
 
-                        <Button type="button" variant="secondary" size="sm" onClick={addCustomProvider} disabled={busy}>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={addCustomProvider}
+                          disabled={busy}
+                        >
                           <Plus className="size-4" />
                           自定义
                         </Button>
@@ -2617,7 +3210,13 @@ export default function SettingsProvidersPage() {
                   </section>
 
                   {providers.length === 0 ? (
-                    <div className={defaultsOnly ? "hidden" : "rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground"}>
+                    <div
+                      className={
+                        defaultsOnly
+                          ? "hidden"
+                          : "rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground"
+                      }
+                    >
                       还没有配置提供商。
                     </div>
                   ) : null}
@@ -2641,7 +3240,11 @@ export default function SettingsProvidersPage() {
                           }}
                         >
                           <div className="flex items-start gap-3">
-                            <AIIcon name={getString(provider.name, "Provider")} size={42} className="rounded-xl" />
+                            <AIIcon
+                              name={getString(provider.name, "Provider")}
+                              size={42}
+                              className="rounded-xl"
+                            />
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-3">
                                 <div className="truncate text-sm font-semibold">
@@ -2650,10 +3253,14 @@ export default function SettingsProvidersPage() {
                                 <ChevronRight className="size-4 shrink-0 text-muted-foreground transition group-hover:translate-x-0.5" />
                               </div>
 
-                              <div className="mt-1 truncate text-xs text-muted-foreground">{providerHost(provider.baseUrl)}</div>
+                              <div className="mt-1 truncate text-xs text-muted-foreground">
+                                {providerHost(provider.baseUrl)}
+                              </div>
 
                               <div className="mt-3 flex flex-wrap gap-1.5">
-                                <Badge variant={enabled ? "default" : "outline"}>{enabled ? "已启用" : "已停用"}</Badge>
+                                <Badge variant={enabled ? "default" : "outline"}>
+                                  {enabled ? "已启用" : "已停用"}
+                                </Badge>
                                 <Badge variant="secondary">{providerTypeLabel(type)}</Badge>
                                 <Badge variant="outline">{models.length} 个模型</Badge>
                                 {provider.builtIn ? <Badge variant="outline">内置</Badge> : null}
@@ -2672,7 +3279,13 @@ export default function SettingsProvidersPage() {
                   </div>
 
                   {filteredProviders.length === 0 && providers.length > 0 ? (
-                    <div className={defaultsOnly ? "hidden" : "rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground"}>
+                    <div
+                      className={
+                        defaultsOnly
+                          ? "hidden"
+                          : "rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground"
+                      }
+                    >
                       没有匹配的提供商。
                     </div>
                   ) : null}
@@ -2736,9 +3349,17 @@ function ModelLibraryDialog({
           <div className="flex min-w-0 items-center justify-between gap-3">
             <div className="min-w-0">
               <DialogTitle>可用模型</DialogTitle>
-              <DialogDescription className="truncate">共 {totalCount} 个模型，已选择 {selectedCount} 个</DialogDescription>
+              <DialogDescription className="truncate">
+                共 {totalCount} 个模型，已选择 {selectedCount} 个
+              </DialogDescription>
             </div>
-            <Button type="button" variant="outline" size="sm" onClick={onToggleVisible} disabled={models.length === 0}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onToggleVisible}
+              disabled={models.length === 0}
+            >
               {selectAllVisible ? "取消当前" : `选择当前 (${models.length})`}
             </Button>
           </div>
@@ -2746,7 +3367,9 @@ function ModelLibraryDialog({
 
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-3">
           {models.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">没有匹配的模型</div>
+            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+              没有匹配的模型
+            </div>
           ) : (
             <div className="space-y-2">
               {models.map((model) => (
@@ -2756,7 +3379,9 @@ function ModelLibraryDialog({
                 >
                   <Checkbox
                     checked={Boolean(selected[model.modelId])}
-                    onCheckedChange={(checked) => onToggleSelection(providerId, model.modelId, Boolean(checked))}
+                    onCheckedChange={(checked) =>
+                      onToggleSelection(providerId, model.modelId, Boolean(checked))
+                    }
                     disabled={!providerId}
                   />
                   <AIIcon name={model.modelId} size={30} className="shrink-0 rounded-md" />
@@ -2822,13 +3447,19 @@ function ConnectionTestDialog({
       <DialogContent className="max-h-[min(720px,calc(100dvh-2rem))] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>测试连接</DialogTitle>
-          <DialogDescription>选择当前供应商下的聊天模型，依次测试非流式、流式和工具调用。</DialogDescription>
+          <DialogDescription>
+            选择当前供应商下的聊天模型，依次测试非流式、流式和工具调用。
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div>
             <div className="mb-1 text-xs font-medium">测试模型</div>
-            <Select value={selectedModelId} onValueChange={onModelChange} disabled={testing || models.length === 0}>
+            <Select
+              value={selectedModelId}
+              onValueChange={onModelChange}
+              disabled={testing || models.length === 0}
+            >
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="选择模型" />
               </SelectTrigger>
@@ -2849,18 +3480,39 @@ function ConnectionTestDialog({
           </div>
 
           <div className="space-y-2 rounded-xl border bg-muted/20 p-3">
-            <TestResultItem label="非流式" loading={testing && !result} item={result?.nonStreaming ?? null} />
-            <TestResultItem label="流式" loading={testing && !result} item={result?.streaming ?? null} />
-            <TestResultItem label="工具调用" loading={testing && !result} item={result?.toolCall ?? null} />
+            <TestResultItem
+              label="非流式"
+              loading={testing && !result}
+              item={result?.nonStreaming ?? null}
+            />
+            <TestResultItem
+              label="流式"
+              loading={testing && !result}
+              item={result?.streaming ?? null}
+            />
+            <TestResultItem
+              label="工具调用"
+              loading={testing && !result}
+              item={result?.toolCall ?? null}
+            />
           </div>
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={testing}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={testing}
+          >
             取消
           </Button>
           <Button type="button" onClick={onRun} disabled={testing || !selectedModelId}>
-            {testing ? <LoaderCircle className="size-4 animate-spin" /> : <Network className="size-4" />}
+            {testing ? (
+              <LoaderCircle className="size-4 animate-spin" />
+            ) : (
+              <Network className="size-4" />
+            )}
             测试
           </Button>
         </DialogFooter>
@@ -2881,7 +3533,7 @@ function TestResultItem({
   const success = item?.status === "success";
   const failure = item?.status === "error";
   const skipped = item?.status === "skipped";
-  const text = success ? item?.output : failure ? item?.error : item?.output ?? "";
+  const text = success ? item?.output : failure ? item?.error : (item?.output ?? "");
 
   return (
     <div className="grid gap-2 rounded-lg bg-background px-3 py-2 text-sm sm:grid-cols-[72px_minmax(0,1fr)]">
@@ -2898,7 +3550,9 @@ function TestResultItem({
               <CircleCheck className="size-3.5" />
               成功
             </div>
-            {text ? <div className="line-clamp-3 break-words text-xs text-muted-foreground">{text}</div> : null}
+            {text ? (
+              <div className="line-clamp-3 break-words text-xs text-muted-foreground">{text}</div>
+            ) : null}
           </div>
         ) : failure ? (
           <div className="space-y-1">
@@ -2906,7 +3560,11 @@ function TestResultItem({
               <XCircle className="size-3.5" />
               失败
             </div>
-            {text ? <div className="max-h-24 overflow-y-auto break-words text-xs text-destructive/90">{text}</div> : null}
+            {text ? (
+              <div className="max-h-24 overflow-y-auto break-words text-xs text-destructive/90">
+                {text}
+              </div>
+            ) : null}
           </div>
         ) : skipped ? (
           <div className="space-y-1">

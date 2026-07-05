@@ -21,8 +21,6 @@ export function WebAuthGate() {
       setOpen(true);
       setSubmitting(false);
       setError(null);
-      setUsername("");
-      setPassword("");
     });
   }, []);
 
@@ -72,14 +70,19 @@ export function WebAuthGate() {
             <Input
               ref={inputRef}
               type="text"
+              name="username"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               placeholder={t("web_auth_gate.username_placeholder")}
               autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               disabled={submitting}
             />
             <Input
               type="password"
+              name="current-password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               placeholder={t("web_auth_gate.password_placeholder")}

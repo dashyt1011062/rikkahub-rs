@@ -92,10 +92,7 @@ function getServiceType(service: SearchServiceOption): string | null {
   return value.length > 0 ? value : null;
 }
 
-function getServiceLabel(
-  service: SearchServiceOption,
-  t: TFunction,
-): string {
+function getServiceLabel(service: SearchServiceOption, t: TFunction): string {
   const type = getServiceType(service);
   if (!type) {
     return t("search.default_service_label");
@@ -183,7 +180,8 @@ export function SearchPickerButton({ disabled = false, className }: SearchPicker
 
       try {
         await api.post<{ status: string }>("settings/model/built-in-tool", {
-          modelId: currentModel.id,
+          modelId: currentModel.modelId,
+          providerModelId: currentModel.id,
           tool: SEARCH_TOOL_NAME,
           enabled,
         });

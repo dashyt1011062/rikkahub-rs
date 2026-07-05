@@ -29,6 +29,7 @@ const WEB_AUTH_STORAGE_KEY = "rikkahub:web-auth";
 const WEB_AUTH_REQUIRED_EVENT = "rikkahub:web-auth-required";
 const WEB_AUTH_EXPIRY_SKEW_MILLIS = 10_000;
 const WEB_AUTH_QUERY_KEY = "access_token";
+let webAuthPromptPending = false;
 
 function isBrowser(): boolean {
   return typeof window !== "undefined";
@@ -66,7 +67,11 @@ function getValidWebAuthToken(): string | null {
 
 function dispatchWebAuthRequired(detail: WebAuthRequiredEventDetail) {
   if (!isBrowser()) return;
-  window.dispatchEvent(new CustomEvent<WebAuthRequiredEventDetail>(WEB_AUTH_REQUIRED_EVENT, { detail }));
+  if (webAuthPromptPending) return;
+  webAuthPromptPending = true;
+  window.dispatchEvent(
+    new CustomEvent<WebAuthRequiredEventDetail>(WEB_AUTH_REQUIRED_EVENT, { detail }),
+  );
 }
 
 const kyInstance = ky.create({
@@ -106,6 +111,7 @@ async function handleError(error: unknown): Promise<never> {
 
 export function setWebAuthToken(token: string, expiresAt: number): void {
   if (!isBrowser()) return;
+  webAuthPromptPending = false;
   window.localStorage.setItem(WEB_AUTH_STORAGE_KEY, JSON.stringify({ token, expiresAt }));
 }
 
@@ -191,7 +197,10 @@ const api = {
   },
 };
 
-export async function requestWebAuthToken(username: string, password: string): Promise<WebAuthTokenResponse> {
+export async function requestWebAuthToken(
+  username: string,
+  password: string,
+): Promise<WebAuthTokenResponse> {
   const response = await api.post<WebAuthTokenResponse>("auth/token", { username, password });
   setWebAuthToken(response.token, response.expiresAt);
   return response;
