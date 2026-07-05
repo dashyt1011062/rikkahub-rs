@@ -378,9 +378,6 @@ export function ChatInput({
   className,
 }: ChatInputProps) {
   const { t } = useTranslation("input");
-  const sendOnEnter = useSettingsStore(
-    (state) => state.settings?.displaySetting.sendOnEnter ?? true,
-  );
   const currentAssistant = useCurrentAssistantProfile();
   const { currentModel } = useCurrentModelSelection();
   const richTextRenderingEnabled = useSettingsStore(
@@ -588,17 +585,14 @@ export function ChatInput({
       if (isGenerating || event.nativeEvent.isComposing) return;
 
       if (event.ctrlKey || event.metaKey) {
-        event.preventDefault();
-        void handlePrimaryAction();
+        // Ctrl/Cmd + Enter should be newline (not send)
         return;
       }
-
-      if (!sendOnEnter || event.shiftKey) return;
 
       event.preventDefault();
       void handlePrimaryAction();
     },
-    [handlePrimaryAction, isGenerating, sendOnEnter],
+    [handlePrimaryAction, isGenerating],
   );
 
   const handleUploadInputChange = React.useCallback(
@@ -675,7 +669,7 @@ export function ChatInput({
     [canUpload, uploadFiles],
   );
 
-  const sendHint = sendOnEnter ? t("chat.send_hint_enter") : t("chat.send_hint_newline");
+  const sendHint = t("chat.send_hint_enter");
   const placeholder = ready ? t("chat.placeholder_ready") : t("chat.placeholder_not_ready");
 
   return (
