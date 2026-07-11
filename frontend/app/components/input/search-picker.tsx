@@ -21,7 +21,6 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "~/components/ui/popover";
-import { ScrollArea } from "~/components/ui/scroll-area";
 import { Switch } from "~/components/ui/switch";
 
 import { PickerErrorAlert } from "./picker-error-alert";
@@ -228,17 +227,22 @@ export function SearchPickerButton({ disabled = false, className }: SearchPicker
         </Button>
       </PopoverTrigger>
 
-      <PopoverContent align="end" className="w-[min(92vw,28rem)] gap-0 p-0">
-        <PopoverHeader className="border-b px-6 py-4">
+      <PopoverContent
+        align="end"
+        className="flex h-[min(36rem,var(--radix-popover-content-available-height))] max-h-[calc(100dvh-1rem)] w-[min(92vw,28rem)] flex-col gap-0 overflow-hidden p-0"
+      >
+        <PopoverHeader className="shrink-0 border-b px-6 py-4">
           <PopoverTitle>{t("search.title")}</PopoverTitle>
           <PopoverDescription>{t("search.description")}</PopoverDescription>
         </PopoverHeader>
 
-        <div className="space-y-4 px-4 py-4">
-          <PickerErrorAlert error={error} />
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-4">
+          <div className="shrink-0">
+            <PickerErrorAlert error={error} />
+          </div>
 
           {isGeminiModel(currentModel) ? (
-            <div className="flex items-center gap-3 rounded-lg border px-3 py-3">
+            <div className="flex shrink-0 items-center gap-3 rounded-lg border px-3 py-3">
               <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted">
                 <Search className="size-4" />
               </div>
@@ -263,7 +267,7 @@ export function SearchPickerButton({ disabled = false, className }: SearchPicker
 
           {!builtInSearchEnabled ? (
             <>
-              <div className="flex items-center gap-3 rounded-lg border px-3 py-3">
+              <div className="flex shrink-0 items-center gap-3 rounded-lg border px-3 py-3">
                 <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted">
                   <Earth className="size-4" />
                 </div>
@@ -287,9 +291,9 @@ export function SearchPickerButton({ disabled = false, className }: SearchPicker
                 />
               </div>
 
-              <ScrollArea className="h-[16rem] pr-3">
+              <div className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-y-contain rounded-md [scrollbar-color:var(--border)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent">
                 {settings?.searchServices?.length ? (
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-2 pr-1 sm:grid-cols-2">
                     {settings.searchServices.map((service, index) => {
                       const selected = index === settings.searchServiceSelected;
                       const switching = updatingServiceIndex === index;
@@ -336,10 +340,10 @@ export function SearchPickerButton({ disabled = false, className }: SearchPicker
                     {t("search.empty")}
                   </div>
                 )}
-              </ScrollArea>
+              </div>
             </>
           ) : (
-            <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-primary">
+            <div className="min-h-0 overflow-y-auto rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-primary [scrollbar-width:thin]">
               {t("search.builtin_notice")}
             </div>
           )}
