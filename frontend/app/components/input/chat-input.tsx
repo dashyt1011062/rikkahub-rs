@@ -686,7 +686,6 @@ export function ChatInput({
     [canUpload, uploadFiles],
   );
 
-  const sendHint = t("chat.send_hint_enter");
   const placeholder = ready ? t("chat.placeholder_ready") : t("chat.placeholder_not_ready");
 
   return (
@@ -1002,7 +1001,6 @@ export function ChatInput({
             </div>
           </div>
         </div>
-        <p className="mt-2 text-center text-xs text-muted-foreground">{sendHint}</p>
         {error ? <p className="mt-1 text-center text-xs text-destructive">{error}</p> : null}
       </div>
     </div>
