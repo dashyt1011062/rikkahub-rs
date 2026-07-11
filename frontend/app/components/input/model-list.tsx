@@ -23,7 +23,6 @@ import {
   PopoverTrigger,
 } from "~/components/ui/popover";
 import { Input } from "~/components/ui/input";
-import { ScrollArea } from "~/components/ui/scroll-area";
 import {
   Drawer,
   DrawerContent,
@@ -180,6 +179,7 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
   const [selectedProviderId, setSelectedProviderId] = React.useState<string | null>(null);
   const [updatingModelId, setUpdatingModelId] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const providerRailRef = React.useRef<HTMLDivElement | null>(null);
 
   const currentModelId = currentAssistant?.chatModelId ?? settings?.chatModelId ?? null;
   const favoriteModelIds = settings?.favoriteModels ?? [];
@@ -368,6 +368,30 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
     [disabled, favoriteModelIds, settings, t],
   );
 
+  const handleProviderWheel = React.useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      const rail = providerRailRef.current;
+      if (!rail) {
+        return;
+      }
+
+      const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+      if (delta === 0) {
+        return;
+      }
+
+      const maxScrollLeft = Math.max(0, rail.scrollWidth - rail.clientWidth);
+      const canScroll = delta < 0 ? rail.scrollLeft > 0 : rail.scrollLeft < maxScrollLeft;
+      if (!canScroll) {
+        return;
+      }
+
+      event.preventDefault();
+      rail.scrollLeft += delta;
+    },
+    [],
+  );
+
   const trigger = (
     <Button
       type="button"
@@ -392,8 +416,6 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
     </Button>
   );
 
-  const bodyHeightClass = isMobile ? "h-[min(68dvh,32rem)]" : "h-[24rem]";
-
   const panelContent = (
     <>
       <div className="relative">
@@ -414,28 +436,32 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
         </div>
       ) : null}
 
-      <div className={cn("min-h-0 flex-1", bodyHeightClass)}>
+      <div className="min-h-0 flex-1">
         {sections.length === 0 && favoriteModels.length === 0 ? (
           <div className="rounded-md border border-dashed px-3 py-8 text-center text-sm text-muted-foreground">
             {t("model_list.empty")}
           </div>
         ) : (
           <div className="flex h-full min-h-0 flex-col gap-2 overflow-hidden">
-            <ScrollArea className="max-h-24 w-full shrink-0">
-              <div className="flex flex-wrap items-center gap-1.5 pb-1">
+            <div
+              ref={providerRailRef}
+              onWheel={handleProviderWheel}
+              className="w-full shrink-0 touch-pan-x overflow-x-auto overflow-y-hidden overscroll-x-contain pb-2 [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent"
+            >
+              <div className="grid w-max min-w-full auto-cols-max grid-flow-col grid-rows-2 gap-1.5 pr-1">
                 {favoriteModels.length > 0 && (
                   <button
                     type="button"
                     className={cn(
-                      "bg-muted/60 hover:bg-muted inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
+                      "bg-muted/60 hover:bg-muted inline-flex max-w-44 items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
                       isFavoriteSectionSelected && "border-primary bg-primary/10 text-primary",
                     )}
                     onClick={() => {
                       setSelectedProviderId(FAVORITE_SECTION_ID);
                     }}
                   >
-                    <Heart className={cn("size-3", isFavoriteSectionSelected && "fill-current")} />
-                    <span>{t("model_list.favorites")}</span>
+                    <Heart className={cn("size-3 shrink-0", isFavoriteSectionSelected && "fill-current")} />
+                    <span className="min-w-0 truncate">{t("model_list.favorites")}</span>
                   </button>
                 )}
 
@@ -445,8 +471,9 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
                     <button
                       key={section.providerId}
                       type="button"
+                      title={section.providerName}
                       className={cn(
-                        "bg-muted/60 hover:bg-muted inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
+                        "bg-muted/60 hover:bg-muted inline-flex max-w-44 items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition",
                         selected && "border-primary bg-primary/10 text-primary",
                       )}
                       onClick={() => {
@@ -459,14 +486,14 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
                         className="bg-transparent"
                         imageClassName="h-full w-full"
                       />
-                      <span className="truncate">{section.providerName}</span>
+                      <span className="min-w-0 truncate">{section.providerName}</span>
                     </button>
                   );
                 })}
               </div>
-            </ScrollArea>
+            </div>
 
-            <ScrollArea className="min-h-0 flex-1 rounded-md border">
+            <div className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-y-contain rounded-md border [scrollbar-color:var(--border)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:bg-transparent">
               <div className="space-y-1 p-1.5">
                 {displayedModels.map((model) => (
                   <ModelOptionRow
@@ -482,7 +509,7 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
                   />
                 ))}
               </div>
-            </ScrollArea>
+            </div>
           </div>
         )}
       </div>
@@ -502,7 +529,7 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
     return (
       <Drawer direction="bottom" open={open} onOpenChange={handleOpenChange}>
         <DrawerTrigger asChild>{trigger}</DrawerTrigger>
-        <DrawerContent className="h-[min(82dvh,42rem)] max-h-[82dvh] p-0">
+        <DrawerContent className="h-[min(80dvh,42rem)] max-h-[80dvh] p-0">
           <DrawerHeader className="border-b px-4 py-3 text-left">
             <DrawerTitle className="text-sm">{t("model_list.title")}</DrawerTitle>
             <DrawerDescription className="text-xs">
@@ -524,7 +551,7 @@ export function ModelList({ disabled = false, className, onChanged }: ModelListP
 
       <PopoverContent
         align="end"
-        className="w-[min(96vw,30rem)] gap-0 p-0"
+        className="flex h-[min(36rem,var(--radix-popover-content-available-height))] max-h-[calc(100dvh-1rem)] w-[min(96vw,30rem)] flex-col gap-0 overflow-hidden p-0"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
         }}
