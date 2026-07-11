@@ -584,15 +584,32 @@ export function ChatInput({
       if (event.key !== "Enter") return;
       if (isGenerating || event.nativeEvent.isComposing) return;
 
-      if (event.ctrlKey || event.metaKey) {
-        // Ctrl/Cmd + Enter should be newline (not send)
+      if (event.ctrlKey || event.metaKey || event.shiftKey) {
+        event.preventDefault();
+
+        const textarea = event.currentTarget;
+        const selectionStart = textarea.selectionStart;
+        const selectionEnd = textarea.selectionEnd;
+        const nextValue = `${value.slice(0, selectionStart)}\n${value.slice(selectionEnd)}`;
+        const nextCursorPosition = selectionStart + 1;
+
+        onValueChange(nextValue);
+        if (error) {
+          setError(null);
+        }
+
+        window.requestAnimationFrame(() => {
+          const currentTextarea = textareaRef.current;
+          currentTextarea?.focus();
+          currentTextarea?.setSelectionRange(nextCursorPosition, nextCursorPosition);
+        });
         return;
       }
 
       event.preventDefault();
       void handlePrimaryAction();
     },
-    [handlePrimaryAction, isGenerating],
+    [error, handlePrimaryAction, isGenerating, onValueChange, value],
   );
 
   const handleUploadInputChange = React.useCallback(
