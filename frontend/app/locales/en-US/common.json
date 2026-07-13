@@ -58,7 +58,12 @@
     "switch_assistant_failed": "Failed to switch assistant",
     "current": "Current",
     "switching": "Switching...",
-    "no_assistants_by_tag": "No assistants match the selected tags"
+    "no_assistants_by_tag": "No assistants match the selected tags",
+    "favorite_messages": "Favorite messages",
+    "favorite_loading": "Loading favorites...",
+    "no_favorite_messages": "No favorite messages yet",
+    "favorite_no_preview": "No preview available",
+    "favorite_load_failed": "Failed to load favorite messages"
   },
   "conversation_search": {
     "search_conversations": "Search conversations",

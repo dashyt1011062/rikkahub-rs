@@ -33,6 +33,15 @@ jobs:
           context: .
           file: ./Dockerfile
           push: false
-          tags: rikkahub-rs:ci
+          tags: rikkahub-rs:cloud
+          outputs: type=docker,dest=/tmp/rikkahub-rs-image.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rikkahub-rs-cloud-image
+          path: /tmp/rikkahub-rs-image.tar
+          retention-days: 7
+          compression-level: 0

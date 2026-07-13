@@ -74,6 +74,12 @@ pub struct ForkRequest {
     message_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteMessageRequest {
+    tag: String,
+}
+
 pub async fn list_legacy(
     Extension(account): Extension<AccountId>,
     State(state): State<AppState>,
@@ -144,6 +150,58 @@ pub async fn search(
         )
         .await?,
     ))
+}
+
+pub async fn list_favorites(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    Query(query): Query<SearchQuery>,
+) -> AppResult<Json<Vec<db::FavoriteMessageDto>>> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let assistant_id = settings_store::current_assistant_id(&state.config, &account.0).await;
+    Ok(Json(
+        db::list_message_favorites(
+            state.config.db_path.clone(),
+            account.0,
+            assistant_id,
+            limit,
+        )
+        .await?,
+    ))
+}
+
+pub async fn favorite_message(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    Path((id, message_id)): Path<(String, String)>,
+    Json(request): Json<FavoriteMessageRequest>,
+) -> AppResult<Json<Value>> {
+    db::upsert_message_favorite(
+        state.config.db_path.clone(),
+        account.0,
+        id,
+        message_id,
+        request.tag,
+    )
+    .await?;
+    Ok(Json(json!({ "status": "saved" })))
+}
+
+pub async fn unfavorite_message(
+    Extension(account): Extension<AccountId>,
+    State(state): State<AppState>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let deleted = db::delete_message_favorite(
+        state.config.db_path.clone(),
+        account.0,
+        id,
+        message_id,
+    )
+    .await?;
+    Ok(Json(json!({
+        "status": if deleted { "deleted" } else { "not_found" }
+    })))
 }
 
 pub async fn detail(

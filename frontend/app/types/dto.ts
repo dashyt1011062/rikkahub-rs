@@ -46,6 +46,18 @@ export interface ConversationSearchResultDto {
   snippet: string;
 }
 
+export interface FavoriteMessageDto {
+  conversationId: string;
+  nodeId: string;
+  messageId: string;
+  title: string;
+  tag: string;
+  role: string;
+  snippet: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /**
  * Message DTO (for API response)
  * @see app/src/main/java/me/rerere/rikkahub/web/dto/WebDto.kt - MessageDto

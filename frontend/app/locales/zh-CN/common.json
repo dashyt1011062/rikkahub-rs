@@ -58,7 +58,12 @@
     "switch_assistant_failed": "切换助手失败",
     "current": "当前",
     "switching": "切换中...",
-    "no_assistants_by_tag": "没有符合标签的助手"
+    "no_assistants_by_tag": "没有符合标签的助手",
+    "favorite_messages": "收藏消息",
+    "favorite_loading": "正在加载收藏...",
+    "no_favorite_messages": "暂无收藏消息",
+    "favorite_no_preview": "无可预览内容",
+    "favorite_load_failed": "加载收藏消息失败"
   },
   "conversation_search": {
     "search_conversations": "搜索对话",

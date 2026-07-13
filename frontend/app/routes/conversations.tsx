@@ -42,6 +42,7 @@ import {
   type ConversationErrorEventDto,
   type ConversationSnapshotEventDto,
   type ConversationListDto,
+  type FavoriteMessageDto,
   type PagedResult,
   type ProviderModel,
   type Settings,
@@ -1199,9 +1200,11 @@ const ConversationTimeline = React.memo(({
   settings,
   conversationAssistantId,
   contentClassName,
+  favoriteByMessageId,
   onEdit,
   onDelete,
   onQuote,
+  onFavorite,
   onFork,
   onRegenerate,
   onCancelPending,
@@ -1220,9 +1223,15 @@ const ConversationTimeline = React.memo(({
   settings: Settings | null;
   conversationAssistantId: string | null;
   contentClassName?: string;
+  favoriteByMessageId: Map<string, FavoriteMessageDto>;
   onEdit: (message: MessageDto) => void | Promise<void>;
   onDelete: (messageIds: string | string[]) => Promise<void>;
   onQuote: (message: MessageDto) => void | Promise<void>;
+  onFavorite: (
+    message: MessageDto,
+    node: MessageNodeDto,
+    tag: string | null,
+  ) => Promise<void>;
   onFork: (messageId: string) => Promise<void>;
   onRegenerate: (messageId: string) => Promise<void>;
   onCancelPending: (pendingId: number) => Promise<void>;
@@ -1359,6 +1368,7 @@ const ConversationTimeline = React.memo(({
           timelineItems.map((item, index) => {
             const { node, message } = item;
             const model = message.modelId ? (modelById.get(message.modelId) ?? null) : null;
+            const favorite = favoriteByMessageId.get(message.id);
 
             return (
               <div
@@ -1385,6 +1395,9 @@ const ConversationTimeline = React.memo(({
                   onEdit={onEdit}
                   onDelete={onDelete}
                   onQuote={onQuote}
+                  isFavorite={Boolean(favorite)}
+                  favoriteTag={favorite?.tag}
+                  onFavorite={onFavorite}
                   onFork={onFork}
                   onRegenerate={onRegenerate}
                   onSelectBranch={onSelectBranch}
@@ -1467,6 +1480,44 @@ function ConversationsPageInner() {
   const [homeDraftId, setHomeDraftId] = React.useState(() => createHomeDraftId());
   const [editingSession, setEditingSession] = React.useState<EditingSession | null>(null);
   const [quotedMessage, setQuotedMessage] = React.useState<MessageDto | null>(null);
+  const [favoriteMessages, setFavoriteMessages] = React.useState<FavoriteMessageDto[]>([]);
+  const [favoritesLoading, setFavoritesLoading] = React.useState(false);
+  const [favoritesError, setFavoritesError] = React.useState<string | null>(null);
+
+  const refreshFavoriteMessages = React.useCallback(async () => {
+    if (!currentAssistantId) {
+      setFavoriteMessages([]);
+      setFavoritesError(null);
+      setFavoritesLoading(false);
+      return;
+    }
+
+    setFavoritesLoading(true);
+    try {
+      const items = await api.get<FavoriteMessageDto[]>("favorites/messages", {
+        searchParams: { limit: 100 },
+      });
+      setFavoriteMessages(items);
+      setFavoritesError(null);
+    } catch (error) {
+      setFavoritesError(
+        error instanceof Error && error.message
+          ? error.message
+          : i18n.t("common:conversation_sidebar.favorite_load_failed"),
+      );
+    } finally {
+      setFavoritesLoading(false);
+    }
+  }, [currentAssistantId]);
+
+  React.useEffect(() => {
+    void refreshFavoriteMessages();
+  }, [refreshFavoriteMessages]);
+
+  const favoriteByMessageId = React.useMemo(
+    () => new Map(favoriteMessages.map((favorite) => [favorite.messageId, favorite])),
+    [favoriteMessages],
+  );
 
   const {
     detail,
@@ -1728,8 +1779,30 @@ function ConversationsPageInner() {
         await api.delete<{ status: string }>(`conversations/${activeId}/messages/${messageId}`);
       }
       await refreshDetail({ reportError: false });
+      await refreshFavoriteMessages();
     },
-    [activeId, refreshDetail],
+    [activeId, refreshDetail, refreshFavoriteMessages],
+  );
+
+  const handleFavoriteMessage = React.useCallback(
+    async (message: MessageDto, _node: MessageNodeDto, tag: string | null) => {
+      if (!activeId) return;
+
+      if (tag === null) {
+        await api.delete<{ status: string }>(
+          `conversations/${activeId}/messages/${message.id}/favorite`,
+        );
+        toast.success(i18n.t("message:chat_message.favorite_removed"));
+      } else {
+        await api.post<{ status: string }>(
+          `conversations/${activeId}/messages/${message.id}/favorite`,
+          { tag },
+        );
+        toast.success(i18n.t("message:chat_message.favorite_saved"));
+      }
+      await refreshFavoriteMessages();
+    },
+    [activeId, refreshFavoriteMessages],
   );
 
   const handleForkMessage = React.useCallback(
@@ -2029,9 +2102,11 @@ function ConversationsPageInner() {
             isGenerating={detail?.isGenerating ?? false}
             settings={settings}
             conversationAssistantId={detail?.assistantId ?? null}
+            favoriteByMessageId={favoriteByMessageId}
             onEdit={handleStartEdit}
             onDelete={handleDeleteMessage}
             onQuote={handleQuoteMessage}
+            onFavorite={handleFavoriteMessage}
             onFork={handleForkMessage}
             onRegenerate={handleRegenerate}
             onCancelPending={handleCancelPendingMessage}
@@ -2080,6 +2155,9 @@ function ConversationsPageInner() {
     <SidebarProvider defaultOpen className="h-svh overflow-hidden">
       <ConversationSidebar
         conversations={conversations}
+        favoriteMessages={favoriteMessages}
+        favoritesLoading={favoritesLoading}
+        favoritesError={favoritesError}
         activeId={activeId}
         loading={loading}
         error={error}

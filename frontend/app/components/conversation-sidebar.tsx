@@ -6,6 +6,7 @@ import dayjs from "dayjs";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
+  Bookmark,
   Check,
   Laptop,
   Languages,
@@ -72,7 +73,13 @@ import { CustomThemeDialog } from "~/components/custom-theme-dialog";
 import { useConfirm, usePrompt } from "~/components/confirm-dialog-provider";
 import { getAssistantDisplayName } from "~/lib/display";
 import { clearWebAuthToken } from "~/services/api";
-import type { AssistantAvatar, AssistantProfile, AssistantTag, ConversationListDto } from "~/types";
+import type {
+  AssistantAvatar,
+  AssistantProfile,
+  AssistantTag,
+  ConversationListDto,
+  FavoriteMessageDto,
+} from "~/types";
 
 export interface ConversationSelectTarget {
   messageId?: string | null;
@@ -210,6 +217,9 @@ function groupConversations(
 
 export interface ConversationSidebarProps {
   conversations: ConversationListDto[];
+  favoriteMessages: FavoriteMessageDto[];
+  favoritesLoading: boolean;
+  favoritesError: string | null;
   activeId: string | null;
   loading: boolean;
   error: string | null;
@@ -571,6 +581,9 @@ function LanguageSwitcher() {
 
 export function ConversationSidebar({
   conversations,
+  favoriteMessages,
+  favoritesLoading,
+  favoritesError,
   activeId,
   loading,
   error,
@@ -784,6 +797,70 @@ export function ConversationSidebar({
 
             <ConversationSearchButton onSelect={onSelect} />
           </div>
+        </SidebarGroup>
+
+        <SidebarGroup className="py-0">
+          <SidebarGroupLabel className="gap-2">
+            <Bookmark className="size-3.5" />
+            <span>{t("conversation_sidebar.favorite_messages")}</span>
+            {favoriteMessages.length > 0 ? (
+              <Badge variant="secondary" className="ml-auto h-5 min-w-5 justify-center px-1 text-[10px]">
+                {favoriteMessages.length}
+              </Badge>
+            ) : null}
+          </SidebarGroupLabel>
+          <ScrollArea className="max-h-56">
+            <SidebarMenu className="pr-1">
+              {favoritesLoading ? (
+                <SidebarMenuItem>
+                  <div className="px-2 py-2 text-xs text-muted-foreground">
+                    {t("conversation_sidebar.favorite_loading")}
+                  </div>
+                </SidebarMenuItem>
+              ) : null}
+              {favoritesError ? (
+                <SidebarMenuItem>
+                  <div className="px-2 py-2 text-xs text-destructive">{favoritesError}</div>
+                </SidebarMenuItem>
+              ) : null}
+              {!favoritesLoading && !favoritesError && favoriteMessages.length === 0 ? (
+                <SidebarMenuItem>
+                  <div className="px-2 py-2 text-xs text-muted-foreground">
+                    {t("conversation_sidebar.no_favorite_messages")}
+                  </div>
+                </SidebarMenuItem>
+              ) : null}
+              {favoriteMessages.map((favorite) => (
+                <SidebarMenuItem key={favorite.messageId}>
+                  <button
+                    type="button"
+                    className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-sidebar-ring flex w-full flex-col gap-1 rounded-md px-2 py-2 text-left outline-none focus-visible:ring-2"
+                    title={`${favorite.tag} · ${
+                      favorite.title || t("conversation_sidebar.unnamed_conversation")
+                    }\n${favorite.snippet}`}
+                    onClick={() => {
+                      onSelect(favorite.conversationId, {
+                        messageId: favorite.messageId,
+                        nodeId: favorite.nodeId,
+                      });
+                    }}
+                  >
+                    <span className="flex w-full min-w-0 items-center gap-1.5">
+                      <Badge variant="outline" className="max-w-24 shrink-0 truncate px-1.5 py-0 text-[10px]">
+                        {favorite.tag}
+                      </Badge>
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                        {favorite.title || t("conversation_sidebar.unnamed_conversation")}
+                      </span>
+                    </span>
+                    <span className="w-full truncate text-[11px] text-muted-foreground">
+                      {favorite.snippet || t("conversation_sidebar.favorite_no_preview")}
+                    </span>
+                  </button>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </ScrollArea>
         </SidebarGroup>
 
         <SidebarGroup className="flex min-h-0 flex-1 flex-col">

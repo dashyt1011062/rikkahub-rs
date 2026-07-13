@@ -29,7 +29,20 @@
     "prompt_tokens": "{{promptTokens}} tokens",
     "completion_tokens": "{{completionTokens}} tokens",
     "tokens_per_second": "{{value}} tok/s",
-    "duration_seconds": "{{value}}s"
+    "duration_seconds": "{{value}}s",
+    "favorite_message": "Favorite message",
+    "favorite": "Favorite",
+    "remove_favorite": "Remove favorite",
+    "remove_favorite_with_tag": "Remove favorite (tag: {{tag}})",
+    "favorite_title": "Favorite message",
+    "favorite_description": "Add a tag so this message is easy to find from the sidebar.",
+    "favorite_tag_placeholder": "Enter a favorite tag",
+    "favorite_default_tag": "Favorite",
+    "favorite_save": "Save",
+    "favorite_cancel": "Cancel",
+    "favorite_tag_required": "Favorite tag cannot be empty",
+    "favorite_saved": "Message saved to favorites",
+    "favorite_removed": "Message removed from favorites"
   },
   "tool_part": {
     "memory_create": "Create memory",

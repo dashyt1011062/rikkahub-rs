@@ -38,6 +38,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/conversations", get(conversation_routes::list_legacy))
         .route("/conversations/paged", get(conversation_routes::paged))
         .route("/conversations/search", get(conversation_routes::search))
+        .route("/favorites/messages", get(conversation_routes::list_favorites))
         .route("/conversations/stream", get(conversation_routes::list_stream))
         .route("/conversations/:id", get(conversation_routes::detail).delete(conversation_routes::delete_conversation))
         .route("/conversations/:id/stream", get(conversation_routes::detail_stream))
@@ -55,6 +56,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/conversations/:id/nodes/:node_id/select", post(conversation_routes::select_node))
         .route("/conversations/:id/messages/:message_id/edit", post(conversation_routes::edit_message))
         .route("/conversations/:id/messages/:message_id", delete(conversation_routes::delete_message))
+        .route(
+            "/conversations/:id/messages/:message_id/favorite",
+            post(conversation_routes::favorite_message).delete(conversation_routes::unfavorite_message),
+        )
         .route("/files/:id", delete(file_routes::delete_by_id))
         .route("/files/id/:id", get(file_routes::by_id))
         .route("/files/path/*path", get(file_routes::by_path))

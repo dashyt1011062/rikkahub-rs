@@ -107,6 +107,20 @@ pub struct ConversationSearchResultDto {
     pub snippet: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteMessageDto {
+    pub conversation_id: String,
+    pub node_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub tag: String,
+    pub role: String,
+    pub snippet: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedFileRecord {
     pub id: i64,
@@ -343,6 +357,147 @@ pub async fn search_conversations(
     .await
     .map_err(|error| AppError::internal(format!("conversation search task failed: {error}")))??;
     Ok(rows)
+}
+
+pub async fn list_message_favorites(
+    db_path: PathBuf,
+    account_id: String,
+    assistant_id: String,
+    limit: i64,
+) -> AppResult<Vec<FavoriteMessageDto>> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        ensure_message_favorite_table(&conn)?;
+        let fetch_limit = limit.clamp(1, 200).saturating_mul(4);
+        let mut stmt = conn.prepare(
+            "SELECT f.conversation_id, f.node_id, f.message_id, c.title, f.tag,
+                    f.created_at, f.updated_at, n.messages
+             FROM message_favorite f
+             JOIN conversationentity c
+               ON c.id = f.conversation_id AND c.account_id = f.account_id
+             JOIN message_node n
+               ON n.id = f.node_id AND n.conversation_id = f.conversation_id
+             WHERE f.account_id = ?1 AND c.assistant_id = ?2
+             ORDER BY f.updated_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![&account_id, &assistant_id, fetch_limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+
+        let mut favorites = Vec::new();
+        for row in rows {
+            let (conversation_id, node_id, message_id, title, tag, created_at, updated_at, messages_raw) = row?;
+            let Some(message) = parse_messages(&messages_raw)
+                .into_iter()
+                .find(|message| message.id == message_id)
+            else {
+                continue;
+            };
+            favorites.push(FavoriteMessageDto {
+                conversation_id,
+                node_id,
+                message_id,
+                title,
+                tag,
+                role: message.role.clone(),
+                snippet: favorite_message_snippet(&message),
+                created_at,
+                updated_at,
+            });
+            if favorites.len() >= limit.clamp(1, 200) as usize {
+                break;
+            }
+        }
+        Ok::<Vec<FavoriteMessageDto>, AppError>(favorites)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("favorite message list task failed: {error}")))?
+}
+
+pub async fn upsert_message_favorite(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+    message_id: String,
+    tag: String,
+) -> AppResult<()> {
+    task::spawn_blocking(move || {
+        let tag = tag.trim().chars().take(64).collect::<String>();
+        if tag.is_empty() {
+            return Err(AppError::bad_request("Favorite tag cannot be empty"));
+        }
+
+        let conn = open_connection(&db_path)?;
+        ensure_message_favorite_table(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.messages
+             FROM message_node n
+             JOIN conversationentity c ON c.id = n.conversation_id
+             WHERE n.conversation_id = ?1 AND c.account_id = ?2
+             ORDER BY n.node_index ASC",
+        )?;
+        let rows = stmt.query_map(params![&conversation_id, &account_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut node_id = None;
+        for row in rows {
+            let (candidate_node_id, messages_raw) = row?;
+            if parse_messages(&messages_raw)
+                .iter()
+                .any(|message| message.id == message_id)
+            {
+                node_id = Some(candidate_node_id);
+                break;
+            }
+        }
+        let node_id = node_id.ok_or_else(|| AppError::not_found("Message not found"))?;
+        let now = now_millis();
+        conn.execute(
+            "INSERT INTO message_favorite (
+                account_id, conversation_id, node_id, message_id, tag, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(account_id, message_id) DO UPDATE SET
+                conversation_id = excluded.conversation_id,
+                node_id = excluded.node_id,
+                tag = excluded.tag,
+                updated_at = excluded.updated_at",
+            params![&account_id, &conversation_id, &node_id, &message_id, &tag, now],
+        )?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("favorite message upsert task failed: {error}")))?
+}
+
+pub async fn delete_message_favorite(
+    db_path: PathBuf,
+    account_id: String,
+    conversation_id: String,
+    message_id: String,
+) -> AppResult<bool> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        ensure_message_favorite_table(&conn)?;
+        Ok::<bool, AppError>(
+            conn.execute(
+                "DELETE FROM message_favorite
+                 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+                params![&account_id, &conversation_id, &message_id],
+            )? > 0,
+        )
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("favorite message delete task failed: {error}")))?
 }
 
 pub async fn get_file_by_id(db_path: PathBuf, account_id: String, id: i64) -> AppResult<ManagedFileRecord> {
@@ -637,6 +792,7 @@ pub async fn delete_conversation(db_path: PathBuf, account_id: String, conversat
         let mut conn = open_connection(&db_path)?;
         let tx = conn.transaction()?;
         ensure_pending_message_queue(&tx)?;
+        ensure_message_favorite_table(&tx)?;
         let deleted = tx.execute(
             "DELETE FROM conversationentity WHERE id = ?1 AND account_id = ?2",
             params![&conversation_id, &account_id],
@@ -644,6 +800,10 @@ pub async fn delete_conversation(db_path: PathBuf, account_id: String, conversat
         if deleted {
             tx.execute("DELETE FROM message_fts WHERE conversation_id = ?1", params![&conversation_id])?;
             tx.execute("DELETE FROM pending_message_queue WHERE conversation_id = ?1", params![&conversation_id])?;
+            tx.execute(
+                "DELETE FROM message_favorite WHERE account_id = ?1 AND conversation_id = ?2",
+                params![&account_id, &conversation_id],
+            )?;
         }
         tx.commit()?;
         Ok::<bool, AppError>(deleted)
@@ -948,6 +1108,33 @@ fn ensure_conversation_writable(conn: &Connection, id: &str, account_id: &str) -
     Ok(())
 }
 
+fn ensure_message_favorite_table(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_favorite (
+            account_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (account_id, message_id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_message_favorite_account_updated
+         ON message_favorite(account_id, updated_at DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_message_favorite_conversation
+         ON message_favorite(account_id, conversation_id)",
+        [],
+    )?;
+    Ok(())
+}
+
 fn ensure_pending_message_queue(conn: &Connection) -> AppResult<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS pending_message_queue (
@@ -1080,6 +1267,23 @@ fn extract_message_search_text(message: &MessageDto) -> String {
         .chars()
         .take(10_000)
         .collect()
+}
+
+fn favorite_message_snippet(message: &MessageDto) -> String {
+    let text = extract_message_search_text(message)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !text.is_empty() {
+        return text.chars().take(180).collect();
+    }
+
+    message
+        .parts
+        .iter()
+        .find_map(|part| part.get("type").and_then(Value::as_str))
+        .map(|kind| format!("[{kind}]"))
+        .unwrap_or_else(|| format!("[{}]", message.role.to_ascii_lowercase()))
 }
 
 fn build_search_text(title: &str, message: &MessageDto) -> String {

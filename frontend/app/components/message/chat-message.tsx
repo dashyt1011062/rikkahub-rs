@@ -1,10 +1,12 @@
 import * as React from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import {
   ArrowDown,
   ArrowUp,
+  Bookmark,
   ChevronLeft,
   ChevronRight,
   Clock3,
@@ -42,7 +44,7 @@ import {
 import { ChatMessageAnnotationsRow } from "./chat-message-annotations";
 import { ChatMessageAvatarRow } from "./chat-message-avatar-row";
 import { MessageParts } from "./message-part";
-import { useConfirm } from "~/components/confirm-dialog-provider";
+import { useConfirm, usePrompt } from "~/components/confirm-dialog-provider";
 
 interface ChatMessageProps {
   node: MessageNodeDto;
@@ -62,6 +64,9 @@ interface ChatMessageProps {
   onSelectBranch?: (nodeId: string, selectIndex: number) => void | Promise<void>;
   onDelete?: (messageIds: string | string[]) => void | Promise<void>;
   onQuote?: (message: MessageDto) => void | Promise<void>;
+  isFavorite?: boolean;
+  favoriteTag?: string;
+  onFavorite?: (message: MessageDto, node: MessageNodeDto, tag: string | null) => void | Promise<void>;
   onFork?: (messageId: string) => void | Promise<void>;
   onToolApproval?: (toolCallId: string, approved: boolean, reason: string) => void | Promise<void>;
 }
@@ -187,6 +192,9 @@ const ChatMessageActionsRow = React.memo(({
   onSelectBranch,
   onDelete,
   onQuote,
+  isFavorite,
+  favoriteTag,
+  onFavorite,
   onFork,
 }: {
   node: MessageNodeDto;
@@ -203,13 +211,18 @@ const ChatMessageActionsRow = React.memo(({
   onSelectBranch?: (nodeId: string, selectIndex: number) => void | Promise<void>;
   onDelete?: (messageIds: string | string[]) => void | Promise<void>;
   onQuote?: (message: MessageDto) => void | Promise<void>;
+  isFavorite?: boolean;
+  favoriteTag?: string;
+  onFavorite?: (message: MessageDto, node: MessageNodeDto, tag: string | null) => void | Promise<void>;
   onFork?: (messageId: string) => void | Promise<void>;
 }) => {
   const { t } = useTranslation("message");
   const confirm = useConfirm();
+  const prompt = usePrompt();
   const [regenerating, setRegenerating] = React.useState(false);
   const [switchingBranch, setSwitchingBranch] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+  const [favoriting, setFavoriting] = React.useState(false);
   const [forking, setForking] = React.useState(false);
 
   const handleCopy = React.useCallback(async () => {
@@ -276,6 +289,35 @@ const ChatMessageActionsRow = React.memo(({
     }
   }, [confirm, deleteMessageIds, message.id, onDelete, t]);
 
+  const handleFavorite = React.useCallback(async () => {
+    if (!onFavorite) return;
+
+    let tag: string | null = null;
+    if (!isFavorite) {
+      const value = await prompt({
+        title: t("chat_message.favorite_title"),
+        description: t("chat_message.favorite_description"),
+        placeholder: t("chat_message.favorite_tag_placeholder"),
+        defaultValue: t("chat_message.favorite_default_tag"),
+        confirmText: t("chat_message.favorite_save"),
+        cancelText: t("chat_message.favorite_cancel"),
+      });
+      if (value === null) return;
+      tag = value.trim();
+      if (!tag) {
+        toast.error(t("chat_message.favorite_tag_required"));
+        return;
+      }
+    }
+
+    setFavoriting(true);
+    try {
+      await onFavorite(message, node, tag);
+    } finally {
+      setFavoriting(false);
+    }
+  }, [isFavorite, message, node, onFavorite, prompt, t]);
+
   const handleFork = React.useCallback(async () => {
     if (!onFork) return;
 
@@ -294,7 +336,8 @@ const ChatMessageActionsRow = React.memo(({
     disableEdit !== true &&
     (message.role === "USER" || message.role === "ASSISTANT") &&
     hasEditableContent(message.parts);
-  const actionDisabled = loading || switchingBranch || regenerating || deleting || forking;
+  const actionDisabled =
+    loading || switchingBranch || regenerating || deleting || favoriting || forking;
 
   return (
     <div
@@ -330,6 +373,30 @@ const ChatMessageActionsRow = React.memo(({
           variant="ghost"
         >
           <Quote className="size-3.5" />
+        </Button>
+      )}
+
+      {onFavorite && (
+        <Button
+          aria-label={
+            isFavorite
+              ? t("chat_message.remove_favorite")
+              : t("chat_message.favorite_message")
+          }
+          disabled={actionDisabled}
+          onClick={() => {
+            void handleFavorite();
+          }}
+          size="icon-xs"
+          title={
+            isFavorite
+              ? t("chat_message.remove_favorite_with_tag", { tag: favoriteTag })
+              : t("chat_message.favorite")
+          }
+          type="button"
+          variant="ghost"
+        >
+          <Bookmark className={cn("size-3.5", isFavorite && "fill-current text-primary")} />
         </Button>
       )}
 
@@ -494,6 +561,9 @@ export const ChatMessage = React.memo(({
   onSelectBranch,
   onDelete,
   onQuote,
+  isFavorite,
+  favoriteTag,
+  onFavorite,
   onFork,
   onToolApproval,
 }: ChatMessageProps) => {
@@ -545,6 +615,9 @@ export const ChatMessage = React.memo(({
           onSelectBranch={onSelectBranch}
           onDelete={onDelete}
           onQuote={onQuote}
+          isFavorite={isFavorite}
+          favoriteTag={favoriteTag}
+          onFavorite={onFavorite}
           onFork={onFork}
         />
       )}
