@@ -36,23 +36,23 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
 
   return (
     <>
-      <div className="relative my-2 max-w-md">
+      <div className={`relative my-2 max-w-md ${loaded ? "" : "min-h-48"}`}>
         {!loaded && (
-          <div className="flex h-48 items-center justify-center rounded-md border border-muted bg-muted/30">
+          <div className="absolute inset-0 flex h-48 items-center justify-center rounded-md border border-muted bg-muted/30">
             <div className="text-sm text-muted-foreground">Loading image...</div>
           </div>
         )}
         <img
           src={imageUrl}
           alt="Message attachment"
-          className={`cursor-zoom-in rounded-md border border-muted object-contain ${loaded ? "block" : "hidden"}`}
+          className={`block cursor-zoom-in rounded-md border border-muted object-contain transition-opacity ${loaded ? "opacity-100" : "opacity-0"}`}
           onClick={() => setPreviewOpen(true)}
           onLoad={() => setLoaded(true)}
           onError={() => setError(true)}
           draggable={false}
           loading="lazy"
           decoding="async"
-          fetchPriority="low"
+          fetchPriority="auto"
           style={{ maxHeight: "500px", width: "auto" }}
         />
       </div>
