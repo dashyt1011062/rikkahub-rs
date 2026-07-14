@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -14,6 +15,7 @@ use crate::settings_store;
 use crate::AppState;
 
 const MAX_TOOL_ROUNDS: usize = 4;
+const STREAM_PERSIST_INTERVAL: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Default)]
 pub struct EngineState {
@@ -435,13 +437,26 @@ async fn run_generation(state: AppState, account_id: String, conversation_id: St
     for _ in 0..MAX_TOOL_ROUNDS {
         let assistant_insert_index = conversation.messages.len() as i64;
         let stream_node_id = Arc::new(Mutex::new(None::<String>));
+        let mut last_partial_persist_at = None::<Instant>;
 
         let result = llm::generate_reply_streaming(&state, &account_id, &settings, &conversation, |partial| {
+            let now = Instant::now();
+            let should_persist = last_partial_persist_at
+                .map(|last| now.duration_since(last) >= STREAM_PERSIST_INTERVAL)
+                .unwrap_or(true);
+            if should_persist {
+                last_partial_persist_at = Some(now);
+            }
+
             let state = state.clone();
             let account_id = account_id.clone();
             let conversation_id = conversation_id.clone();
             let stream_node_id = Arc::clone(&stream_node_id);
             async move {
+                if !should_persist {
+                    return Ok(());
+                }
+
                 let mut guard = stream_node_id.lock().await;
                 upsert_assistant_message(
                     &state,
@@ -492,7 +507,7 @@ async fn upsert_assistant_message(
     result: llm::AssistantGenerationResult,
     finished: bool,
 ) -> AppResult<ConversationDto> {
-    let conversation = db::get_conversation(
+    let mut conversation = db::get_conversation(
         state.config.db_path.clone(),
         account_id.to_string(),
         conversation_id.to_string(),
@@ -512,7 +527,7 @@ async fn upsert_assistant_message(
         }
         *stream_node_id = Some(node_id.clone());
         MessageNodeDto {
-            id: node_id.clone(),
+            id: node_id,
             messages: vec![message],
             select_index: 0,
         }
@@ -548,26 +563,47 @@ async fn upsert_assistant_message(
     } else {
         unreachable!("stream_node_id checked above")
     };
+
+    let node_index = conversation
+        .messages
+        .iter()
+        .position(|item| item.id == node.id)
+        .map(|index| index as i64)
+        .unwrap_or_else(|| insert_index.clamp(0, conversation.messages.len() as i64));
+
     db::upsert_message_node(
         state.config.db_path.clone(),
         account_id.to_string(),
         conversation_id.to_string(),
-        node,
-        insert_index,
+        node.clone(),
+        node_index,
         now,
     )
     .await?;
-    let conversation = db::get_conversation(
-        state.config.db_path.clone(),
-        account_id.to_string(),
-        conversation_id.to_string(),
-    )
-    .await?;
-    if finished {
-        emit_changed(state, account_id, &conversation);
+
+    if node_index < conversation.messages.len() as i64 {
+        conversation.messages[node_index as usize] = node.clone();
     } else {
-        emit_conversation_changed(state, account_id, &conversation.id);
+        conversation.messages.push(node.clone());
     }
+    conversation.update_at = now;
+    conversation.is_generating = true;
+
+    state.events.emit(AppEvent::ConversationNodeUpdated {
+        account_id: account_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        node_index,
+        node,
+        update_at: now,
+        is_generating: true,
+    });
+    if finished {
+        state.events.emit(AppEvent::ConversationListInvalidated {
+            account_id: account_id.to_string(),
+            assistant_id: conversation.assistant_id.clone(),
+        });
+    }
+
     Ok(conversation)
 }
 

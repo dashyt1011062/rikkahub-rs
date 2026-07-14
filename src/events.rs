@@ -1,10 +1,20 @@
 use tokio::sync::broadcast;
 
+use crate::db::MessageNodeDto;
+
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     ConversationChanged {
         account_id: String,
         conversation_id: String,
+    },
+    ConversationNodeUpdated {
+        account_id: String,
+        conversation_id: String,
+        node_index: i64,
+        node: MessageNodeDto,
+        update_at: i64,
+        is_generating: bool,
     },
     ConversationListInvalidated {
         account_id: String,
@@ -42,4 +52,3 @@ impl Default for EventHub {
         Self::new()
     }
 }
-

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import Markdown from "~/components/markdown/markdown";
+import { useThrottledValue } from "~/hooks/use-throttled-value";
 import Think from "~/assets/think.svg?react";
 
 interface ReasoningPartProps {
@@ -10,6 +11,7 @@ interface ReasoningPartProps {
 
 export function ReasoningPart({ reasoning, isFinished = true }: ReasoningPartProps) {
   const [expanded, setExpanded] = React.useState(false);
+  const streamedReasoning = useThrottledValue(reasoning, 120, !isFinished);
 
   if (!reasoning) return null;
 
@@ -26,7 +28,11 @@ export function ReasoningPart({ reasoning, isFinished = true }: ReasoningPartPro
       </button>
       {expanded && (
         <div className="border-t border-muted px-3 py-2 text-sm text-muted-foreground">
-          <Markdown content={reasoning} />
+          {isFinished ? (
+            <Markdown content={reasoning} />
+          ) : (
+            <div className="whitespace-pre-wrap break-words leading-6">{streamedReasoning}</div>
+          )}
         </div>
       )}
     </div>

@@ -245,6 +245,27 @@ pub async fn detail_stream(
         let mut seq = 2i64;
         loop {
             match events.recv().await {
+                Ok(AppEvent::ConversationNodeUpdated {
+                    account_id: event_account,
+                    conversation_id,
+                    node_index,
+                    node,
+                    update_at,
+                    is_generating,
+                }) if event_account == account_id && conversation_id == id => {
+                    let payload = json!({
+                        "type": "node_update",
+                        "seq": seq,
+                        "conversationId": conversation_id,
+                        "nodeId": node.id.clone(),
+                        "nodeIndex": node_index,
+                        "node": node,
+                        "updateAt": update_at,
+                        "isGenerating": is_generating,
+                    });
+                    seq += 1;
+                    yield Ok(Event::default().event("node_update").data(payload.to_string()));
+                }
                 Ok(AppEvent::ConversationChanged { account_id: event_account, conversation_id }) if event_account == account_id && conversation_id == id => {
                     if let Ok(mut conversation) = db::get_conversation(db_path.clone(), account_id.clone(), id.clone()).await {
                         conversation.is_generating = engine.is_generating(&account_id, &id).await;

@@ -72,10 +72,11 @@ interface MessagePartsProps {
 function renderContentPart(
   part: UIMessagePart,
   t: (key: string, options?: Record<string, unknown>) => string,
+  loading: boolean,
 ) {
   switch (part.type) {
     case "text":
-      return <TextPart text={part.text} />;
+      return <TextPart text={part.text} loading={loading} />;
     case "image":
       return <ImagePart url={part.url} metadata={part.metadata} />;
     case "video":
@@ -152,7 +153,7 @@ export const MessageParts = React.memo(({ parts, loading = false, onToolApproval
 
         return (
           <React.Fragment key={`content-${block.index}`}>
-            {renderContentPart(block.part, t)}
+            {renderContentPart(block.part, t, loading)}
           </React.Fragment>
         );
       })}

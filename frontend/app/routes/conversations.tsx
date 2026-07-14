@@ -1432,6 +1432,10 @@ const ConversationTimeline = React.memo(({
                 data-message-ids={item.anchorMessageIds.join(" ")}
                 data-node-id={node.id}
                 className="scroll-mt-24"
+                style={{
+                  contentVisibility: "auto",
+                  containIntrinsicSize: "auto 240px",
+                }}
               >
                 <ChatMessage
                   node={node}

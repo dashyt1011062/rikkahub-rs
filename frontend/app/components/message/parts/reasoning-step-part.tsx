@@ -2,6 +2,7 @@ import * as React from "react";
 import { Sparkles } from "lucide-react";
 
 import Markdown from "~/components/markdown/markdown";
+import { useThrottledValue } from "~/hooks/use-throttled-value";
 import type { ReasoningPart as UIReasoningPart } from "~/types";
 import Think from "~/assets/think.svg?react";
 
@@ -31,6 +32,7 @@ function formatDuration(createdAt?: string, finishedAt?: string | null): string 
 export function ReasoningStepPart({ reasoning, isFirst, isLast }: ReasoningStepPartProps) {
   const loading = reasoning.finishedAt == null;
   const [expanded, setExpanded] = React.useState(false);
+  const streamedReasoning = useThrottledValue(reasoning.reasoning, 120, loading);
 
   const onExpandedChange = (nextExpanded: boolean) => {
     setExpanded(nextExpanded);
@@ -58,7 +60,13 @@ export function ReasoningStepPart({ reasoning, isFirst, isLast }: ReasoningStepP
       contentVisible={expanded}
     >
       <div>
-        <Markdown content={reasoning.reasoning} className="text-xs" />
+        {loading ? (
+          <div className="whitespace-pre-wrap break-words text-xs leading-6">
+            {streamedReasoning}
+          </div>
+        ) : (
+          <Markdown content={reasoning.reasoning} className="text-xs" />
+        )}
       </div>
     </ControlledChainOfThoughtStep>
   );
