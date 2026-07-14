@@ -612,6 +612,7 @@ export function ConversationSidebar({
     useTheme();
 
   const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [favoritePickerOpen, setFavoritePickerOpen] = React.useState(false);
   const [customThemeOpen, setCustomThemeOpen] = React.useState(false);
   const [selectedTagIds, setSelectedTagIds] = React.useState<string[]>([]);
   const [switchingAssistantId, setSwitchingAssistantId] = React.useState<string | null>(null);
@@ -800,67 +801,96 @@ export function ConversationSidebar({
         </SidebarGroup>
 
         <SidebarGroup className="py-0">
-          <SidebarGroupLabel className="gap-2">
-            <Bookmark className="size-3.5" />
-            <span>{t("conversation_sidebar.favorite_messages")}</span>
-            {favoriteMessages.length > 0 ? (
-              <Badge variant="secondary" className="ml-auto h-5 min-w-5 justify-center px-1 text-[10px]">
-                {favoriteMessages.length}
-              </Badge>
-            ) : null}
-          </SidebarGroupLabel>
-          <ScrollArea className="max-h-56">
-            <SidebarMenu className="pr-1">
-              {favoritesLoading ? (
-                <SidebarMenuItem>
-                  <div className="px-2 py-2 text-xs text-muted-foreground">
-                    {t("conversation_sidebar.favorite_loading")}
-                  </div>
-                </SidebarMenuItem>
-              ) : null}
-              {favoritesError ? (
-                <SidebarMenuItem>
-                  <div className="px-2 py-2 text-xs text-destructive">{favoritesError}</div>
-                </SidebarMenuItem>
-              ) : null}
-              {!favoritesLoading && !favoritesError && favoriteMessages.length === 0 ? (
-                <SidebarMenuItem>
-                  <div className="px-2 py-2 text-xs text-muted-foreground">
-                    {t("conversation_sidebar.no_favorite_messages")}
-                  </div>
-                </SidebarMenuItem>
-              ) : null}
-              {favoriteMessages.map((favorite) => (
-                <SidebarMenuItem key={favorite.messageId}>
-                  <button
-                    type="button"
-                    className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-sidebar-ring flex w-full flex-col gap-1 rounded-md px-2 py-2 text-left outline-none focus-visible:ring-2"
-                    title={`${favorite.tag} · ${
-                      favorite.title || t("conversation_sidebar.unnamed_conversation")
-                    }\n${favorite.snippet}`}
-                    onClick={() => {
-                      onSelect(favorite.conversationId, {
-                        messageId: favorite.messageId,
-                        nodeId: favorite.nodeId,
-                      });
-                    }}
-                  >
-                    <span className="flex w-full min-w-0 items-center gap-1.5">
-                      <Badge variant="outline" className="max-w-24 shrink-0 truncate px-1.5 py-0 text-[10px]">
-                        {favorite.tag}
+          <Dialog open={favoritePickerOpen} onOpenChange={setFavoritePickerOpen}>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <DialogTrigger asChild>
+                  <SidebarMenuButton className="w-full">
+                    <Bookmark className="size-4" />
+                    <span>{t("conversation_sidebar.favorite_messages")}</span>
+                    {favoriteMessages.length > 0 ? (
+                      <Badge
+                        variant="secondary"
+                        className="ml-auto h-5 min-w-5 justify-center px-1 text-[10px]"
+                      >
+                        {favoriteMessages.length}
                       </Badge>
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                        {favorite.title || t("conversation_sidebar.unnamed_conversation")}
-                      </span>
-                    </span>
-                    <span className="w-full truncate text-[11px] text-muted-foreground">
-                      {favorite.snippet || t("conversation_sidebar.favorite_no_preview")}
-                    </span>
-                  </button>
-                </SidebarMenuItem>
-              ))}
+                    ) : null}
+                  </SidebarMenuButton>
+                </DialogTrigger>
+              </SidebarMenuItem>
             </SidebarMenu>
-          </ScrollArea>
+
+            <DialogContent className="max-h-[80svh] max-w-xl overflow-hidden p-0">
+              <DialogHeader className="border-b px-6 py-4 pr-16">
+                <DialogTitle className="flex items-center gap-2">
+                  <Bookmark className="size-4" />
+                  {t("conversation_sidebar.favorite_messages")}
+                  {favoriteMessages.length > 0 ? (
+                    <Badge
+                      variant="secondary"
+                      className="h-5 min-w-5 justify-center px-1 text-[10px]"
+                    >
+                      {favoriteMessages.length}
+                    </Badge>
+                  ) : null}
+                </DialogTitle>
+              </DialogHeader>
+
+              <ScrollArea className="max-h-[65svh]">
+                <div className="space-y-2 p-4">
+                  {favoritesLoading ? (
+                    <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                      {t("conversation_sidebar.favorite_loading")}
+                    </div>
+                  ) : null}
+                  {favoritesError ? (
+                    <div className="px-2 py-6 text-center text-sm text-destructive">
+                      {favoritesError}
+                    </div>
+                  ) : null}
+                  {!favoritesLoading && !favoritesError && favoriteMessages.length === 0 ? (
+                    <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                      {t("conversation_sidebar.no_favorite_messages")}
+                    </div>
+                  ) : null}
+                  {favoriteMessages.map((favorite) => (
+                    <button
+                      key={favorite.messageId}
+                      type="button"
+                      className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex w-full flex-col gap-1.5 rounded-lg border px-3 py-3 text-left outline-none transition-colors focus-visible:ring-2"
+                      title={[
+                        favorite.tag,
+                        favorite.title || t("conversation_sidebar.unnamed_conversation"),
+                        favorite.snippet,
+                      ]
+                        .filter(Boolean)
+                        .join("\n")}
+                      onClick={() => {
+                        setFavoritePickerOpen(false);
+                        onSelect(favorite.conversationId, {
+                          messageId: favorite.messageId,
+                          nodeId: favorite.nodeId,
+                        });
+                      }}
+                    >
+                      <span className="flex w-full min-w-0 items-center gap-2">
+                        <Badge variant="outline" className="max-w-32 shrink-0 truncate">
+                          {favorite.tag}
+                        </Badge>
+                        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                          {favorite.title || t("conversation_sidebar.unnamed_conversation")}
+                        </span>
+                      </span>
+                      <span className="w-full line-clamp-2 text-xs text-muted-foreground">
+                        {favorite.snippet || t("conversation_sidebar.favorite_no_preview")}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </ScrollArea>
+            </DialogContent>
+          </Dialog>
         </SidebarGroup>
 
         <SidebarGroup className="flex min-h-0 flex-1 flex-col">
