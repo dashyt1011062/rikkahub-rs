@@ -17,12 +17,9 @@ export interface ConversationQuickJumpItem {
   preview?: string;
 }
 
-interface ConversationQuickJumpProps {
+interface ConversationNavigationProps {
   items: ConversationQuickJumpItem[];
-}
-
-interface ConversationScrollControlsProps {
-  items: ConversationQuickJumpItem[];
+  showQuickJump?: boolean;
 }
 
 interface ConversationAnchorOffset extends ConversationQuickJumpItem {
@@ -243,9 +240,21 @@ function useConversationAnchorOffsets(items: ConversationQuickJumpItem[]) {
   };
 }
 
-export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
+type ConversationAnchorOffsetsController = ReturnType<typeof useConversationAnchorOffsets>;
+
+interface ConversationQuickJumpProps {
+  items: ConversationQuickJumpItem[];
+  controller: ConversationAnchorOffsetsController;
+}
+
+interface ConversationScrollControlsProps {
+  items: ConversationQuickJumpItem[];
+  controller: ConversationAnchorOffsetsController;
+}
+
+function ConversationQuickJump({ items, controller }: ConversationQuickJumpProps) {
   const { t } = useTranslation();
-  const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = useConversationAnchorOffsets(items);
+  const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = controller;
   const [activeMessageId, setActiveMessageId] = React.useState<string | null>(null);
   const canQuickJump = items.length > 1 && items.length <= 128;
   const activeIndex = React.useMemo(() => {
@@ -366,10 +375,10 @@ export function ConversationQuickJump({ items }: ConversationQuickJumpProps) {
   );
 }
 
-export function ConversationScrollControls({ items }: ConversationScrollControlsProps) {
+function ConversationScrollControls({ items, controller }: ConversationScrollControlsProps) {
   const { t } = useTranslation();
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
-  const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = useConversationAnchorOffsets(items);
+  const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets } = controller;
   const [direction, setDirection] = React.useState<"older" | "newer" | null>(null);
   const [targets, setTargets] = React.useState<{
     previousId: string | null;
@@ -527,6 +536,20 @@ export function ConversationScrollControls({ items }: ConversationScrollControls
           </Button>
         </div>
       ) : null}
+    </>
+  );
+}
+
+export function ConversationNavigation({
+  items,
+  showQuickJump = true,
+}: ConversationNavigationProps) {
+  const controller = useConversationAnchorOffsets(items);
+
+  return (
+    <>
+      {showQuickJump ? <ConversationQuickJump items={items} controller={controller} /> : null}
+      <ConversationScrollControls items={items} controller={controller} />
     </>
   );
 }

@@ -563,7 +563,11 @@ async fn upsert_assistant_message(
         conversation_id.to_string(),
     )
     .await?;
-    emit_changed(state, account_id, &conversation);
+    if finished {
+        emit_changed(state, account_id, &conversation);
+    } else {
+        emit_conversation_changed(state, account_id, &conversation.id);
+    }
     Ok(conversation)
 }
 
@@ -724,11 +728,15 @@ fn tool_output_text(part: &Value) -> String {
         .join("\n")
 }
 
-fn emit_changed(state: &AppState, account_id: &str, conversation: &ConversationDto) {
+fn emit_conversation_changed(state: &AppState, account_id: &str, conversation_id: &str) {
     state.events.emit(AppEvent::ConversationChanged {
         account_id: account_id.to_string(),
-        conversation_id: conversation.id.clone(),
+        conversation_id: conversation_id.to_string(),
     });
+}
+
+fn emit_changed(state: &AppState, account_id: &str, conversation: &ConversationDto) {
+    emit_conversation_changed(state, account_id, &conversation.id);
     state.events.emit(AppEvent::ConversationListInvalidated {
         account_id: account_id.to_string(),
         assistant_id: conversation.assistant_id.clone(),

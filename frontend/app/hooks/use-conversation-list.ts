@@ -101,18 +101,29 @@ export function useConversationList({
   const updateConversationSummary = React.useCallback(
     (update: ConversationSummaryUpdate) => {
       setConversations((prev) => {
+        const existing = prev.find((item) => item.id === update.id);
         const nextItem: ConversationListDto = {
           id: update.id,
           assistantId: currentAssistantIdRef.current ?? "",
           title: update.title,
           isPinned: update.isPinned,
           createAt: update.createAt,
-          updateAt: update.updateAt,
+          updateAt:
+            existing?.isGenerating && update.isGenerating ? existing.updateAt : update.updateAt,
           isGenerating: update.isGenerating,
         };
-        const existing = prev.find((item) => item.id === update.id);
         if (!existing) {
           return sortConversations([...prev, nextItem]);
+        }
+
+        if (
+          existing.title === nextItem.title &&
+          existing.isPinned === nextItem.isPinned &&
+          existing.createAt === nextItem.createAt &&
+          existing.updateAt === nextItem.updateAt &&
+          existing.isGenerating === nextItem.isGenerating
+        ) {
+          return prev;
         }
 
         return sortConversations(

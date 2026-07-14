@@ -3,8 +3,7 @@ import * as React from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import {
-  ConversationScrollControls,
-  ConversationQuickJump,
+  ConversationNavigation,
   getConversationMessageAnchorId,
 } from "~/components/conversation-quick-jump";
 import { ConversationSidebar } from "~/components/conversation-sidebar";
@@ -753,17 +752,28 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
   const [detail, setDetail] = React.useState<ConversationDto | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [detailError, setDetailError] = React.useState<string | null>(null);
+  const [streamConnected, setStreamConnected] = React.useState(false);
   const activeIdRef = React.useRef(activeId);
   const detailRef = React.useRef<ConversationDto | null>(null);
   const selectedNodeMessagesRef = React.useRef<SelectedNodeMessage[]>([]);
   const mountedRef = React.useRef(true);
   const requestVersionRef = React.useRef(0);
   const scheduledRefreshRef = React.useRef<number | null>(null);
+  const pendingStreamDetailRef = React.useRef<ConversationDto | null>(null);
+  const streamFlushTimerRef = React.useRef<number | null>(null);
 
   const clearScheduledRefresh = React.useCallback(() => {
     if (scheduledRefreshRef.current === null) return;
     clearTimeout(scheduledRefreshRef.current);
     scheduledRefreshRef.current = null;
+  }, []);
+
+  const clearPendingStreamDetail = React.useCallback(() => {
+    if (streamFlushTimerRef.current !== null) {
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+    pendingStreamDetailRef.current = null;
   }, []);
 
   const applyDetail = React.useCallback(
@@ -784,13 +794,45 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     [updateSummary],
   );
 
+  const flushPendingStreamDetail = React.useCallback(() => {
+    if (streamFlushTimerRef.current !== null) {
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+
+    const nextDetail = pendingStreamDetailRef.current;
+    pendingStreamDetailRef.current = null;
+    if (!nextDetail) return;
+
+    applyDetail(nextDetail);
+    setDetailError(null);
+    setDetailLoading(false);
+  }, [applyDetail]);
+
+  const queueStreamDetail = React.useCallback(
+    (nextDetail: ConversationDto) => {
+      pendingStreamDetailRef.current = nextDetail;
+
+      if (!nextDetail.isGenerating) {
+        flushPendingStreamDetail();
+        return;
+      }
+
+      if (streamFlushTimerRef.current !== null || typeof window === "undefined") return;
+      streamFlushTimerRef.current = window.setTimeout(flushPendingStreamDetail, 80);
+    },
+    [flushPendingStreamDetail],
+  );
+
   const resetDetail = React.useCallback(() => {
     clearScheduledRefresh();
+    clearPendingStreamDetail();
     detailRef.current = null;
     setDetail(null);
     setDetailError(null);
     setDetailLoading(false);
-  }, [clearScheduledRefresh]);
+    setStreamConnected(false);
+  }, [clearPendingStreamDetail, clearScheduledRefresh]);
 
   const refreshDetail = React.useCallback<ConversationDetailRefresher>(
     async ({ showLoading = false, clearOnError = false, reportError = true } = {}) => {
@@ -894,8 +936,9 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     () => () => {
       mountedRef.current = false;
       clearScheduledRefresh();
+      clearPendingStreamDetail();
     },
-    [clearScheduledRefresh],
+    [clearPendingStreamDetail, clearScheduledRefresh],
   );
 
   React.useEffect(() => {
@@ -930,6 +973,9 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       void sse<ConversationStreamEvent>(
         `conversations/${activeId}/stream`,
         {
+          onOpen: () => {
+            if (!disposed) setStreamConnected(true);
+          },
           onMessage: ({ event, data }) => {
             if (disposed) return;
 
@@ -939,15 +985,13 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
             }
 
             if (event === "snapshot" && data.type === "snapshot") {
-              applyDetail(data.conversation);
-              setDetailError(null);
-              setDetailLoading(false);
+              queueStreamDetail(data.conversation);
               return;
             }
 
             if (event !== "node_update" || data.type !== "node_update") return;
 
-            const currentDetail = detailRef.current;
+            const currentDetail = pendingStreamDetailRef.current ?? detailRef.current;
             if (!currentDetail) {
               scheduleRefreshDetail();
               return;
@@ -959,18 +1003,18 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
               return;
             }
 
-            applyDetail(nextDetail);
-            setDetailError(null);
-            setDetailLoading(false);
+            queueStreamDetail(nextDetail);
           },
           onError: (streamError) => {
             if (disposed) return;
+            setStreamConnected(false);
             console.error("Conversation detail SSE error:", streamError);
             scheduleRefreshDetail();
             scheduleReconnect();
           },
           onClose: () => {
             if (disposed || nextController.signal.aborted) return;
+            setStreamConnected(false);
             scheduleReconnect();
           },
         },
@@ -978,15 +1022,25 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
       );
     };
 
+    clearPendingStreamDetail();
+    setStreamConnected(false);
     void refreshDetail({ showLoading: true, clearOnError: true });
     connectStream();
 
     return () => {
       disposed = true;
       clearReconnectTimer();
+      clearPendingStreamDetail();
       streamController?.abort();
     };
-  }, [activeId, applyDetail, refreshDetail, resetDetail, scheduleRefreshDetail]);
+  }, [
+    activeId,
+    clearPendingStreamDetail,
+    queueStreamDetail,
+    refreshDetail,
+    resetDetail,
+    scheduleRefreshDetail,
+  ]);
 
   React.useEffect(() => {
     if (!activeId || typeof document === "undefined") return;
@@ -1004,7 +1058,7 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
   }, [activeId, scheduleRefreshDetail]);
 
   React.useEffect(() => {
-    if (!detail?.isGenerating) return;
+    if (!detail?.isGenerating || streamConnected) return;
 
     const timer = window.setInterval(() => {
       void refreshDetail({ reportError: false });
@@ -1013,7 +1067,7 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
     return () => {
       window.clearInterval(timer);
     };
-  }, [detail?.id, detail?.isGenerating, refreshDetail]);
+  }, [detail?.id, detail?.isGenerating, refreshDetail, streamConnected]);
 
   const selectedNodeMessages = React.useMemo<SelectedNodeMessage[]>(() => {
     if (!detail) {
@@ -1425,11 +1479,7 @@ const ConversationTimeline = React.memo(({
           ))}
       </ConversationContent>
 
-      {canQuickJump ? (
-        <ConversationQuickJump items={quickJumpItems} />
-      ) : null}
-
-      <ConversationScrollControls items={quickJumpItems} />
+      <ConversationNavigation items={quickJumpItems} showQuickJump={canQuickJump} />
     </Conversation>
   );
 });
