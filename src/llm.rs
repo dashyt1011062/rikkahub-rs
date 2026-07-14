@@ -414,7 +414,13 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
                 None,
             )
             .await?;
-            stored.push(with_generated_file_metadata(part, record.id, &raw_url, "imgpile"));
+            stored.push(with_generated_file_metadata(
+                part,
+                record.id,
+                &raw_url,
+                "imgpile",
+                None,
+            ));
             index += 1;
             continue;
         }
@@ -422,6 +428,7 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
             stored.push(part);
             continue;
         };
+        let dimensions = file_storage::image_dimensions(&bytes);
         let file_name = format!("generated-image-{}-{}.{}", db::now_millis(), index, extension_for_mime(&mime_type));
         let stored_file = file_storage::store_bytes(
             state,
@@ -436,6 +443,7 @@ pub async fn store_generated_images(state: &AppState, account_id: &str, parts: V
             stored_file.record.id,
             &stored_file.url,
             &stored_file.record.storage_provider,
+            dimensions,
         ));
         index += 1;
     }
@@ -2332,7 +2340,13 @@ fn image_part(url: &str, generated: bool) -> Value {
     }
 }
 
-fn with_generated_file_metadata(part: Value, file_id: i64, url: &str, storage_provider: &str) -> Value {
+fn with_generated_file_metadata(
+    part: Value,
+    file_id: i64,
+    url: &str,
+    storage_provider: &str,
+    dimensions: Option<(u32, u32)>,
+) -> Value {
     let mut next = part.as_object().cloned().unwrap_or_default();
     next.insert("url".to_string(), Value::String(url.to_string()));
     let mut metadata = next
@@ -2343,6 +2357,10 @@ fn with_generated_file_metadata(part: Value, file_id: i64, url: &str, storage_pr
     metadata.insert("generatedImage".to_string(), Value::Bool(true));
     metadata.insert("fileId".to_string(), Value::Number(file_id.into()));
     metadata.insert("storageProvider".to_string(), Value::String(storage_provider.to_string()));
+    if let Some((width, height)) = dimensions {
+        metadata.insert("width".to_string(), Value::Number(width.into()));
+        metadata.insert("height".to_string(), Value::Number(height.into()));
+    }
     next.insert("metadata".to_string(), Value::Object(metadata));
     Value::Object(next)
 }

@@ -14,6 +14,100 @@ pub struct StoredFile {
     pub url: String,
 }
 
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    fn non_zero(width: u32, height: u32) -> Option<(u32, u32)> {
+        (width > 0 && height > 0).then_some((width, height))
+    }
+
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return non_zero(
+            u32::from_be_bytes(bytes[16..20].try_into().ok()?),
+            u32::from_be_bytes(bytes[20..24].try_into().ok()?),
+        );
+    }
+
+    if bytes.len() >= 10 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return non_zero(
+            u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u32,
+            u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u32,
+        );
+    }
+
+    if bytes.len() >= 26 && bytes.starts_with(b"BM") {
+        let width = i32::from_le_bytes(bytes[18..22].try_into().ok()?).unsigned_abs();
+        let height = i32::from_le_bytes(bytes[22..26].try_into().ok()?).unsigned_abs();
+        return non_zero(width, height);
+    }
+
+    if bytes.len() >= 30 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        let chunk = &bytes[12..16];
+        if chunk == b"VP8X" {
+            let width = 1 + u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]);
+            let height = 1 + u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]);
+            return non_zero(width, height);
+        }
+        if chunk == b"VP8 "
+            && bytes.len() >= 30
+            && bytes[23] == 0x9d
+            && bytes[24] == 0x01
+            && bytes[25] == 0x2a
+        {
+            let width = u16::from_le_bytes([bytes[26], bytes[27]]) & 0x3fff;
+            let height = u16::from_le_bytes([bytes[28], bytes[29]]) & 0x3fff;
+            return non_zero(width as u32, height as u32);
+        }
+        if chunk == b"VP8L" && bytes.len() >= 25 && bytes[20] == 0x2f {
+            let b1 = bytes[21] as u32;
+            let b2 = bytes[22] as u32;
+            let b3 = bytes[23] as u32;
+            let b4 = bytes[24] as u32;
+            let width = 1 + b1 + ((b2 & 0x3f) << 8);
+            let height = 1 + (b2 >> 6) + (b3 << 2) + ((b4 & 0x0f) << 10);
+            return non_zero(width, height);
+        }
+    }
+
+    if bytes.len() >= 4 && bytes[0] == 0xff && bytes[1] == 0xd8 {
+        let mut index = 2usize;
+        while index + 3 < bytes.len() {
+            if bytes[index] != 0xff {
+                index += 1;
+                continue;
+            }
+            while index < bytes.len() && bytes[index] == 0xff {
+                index += 1;
+            }
+            if index >= bytes.len() {
+                break;
+            }
+            let marker = bytes[index];
+            index += 1;
+            if marker == 0xd8 || marker == 0xd9 || (0xd0..=0xd7).contains(&marker) || marker == 0x01 {
+                continue;
+            }
+            if index + 2 > bytes.len() {
+                break;
+            }
+            let segment_length = u16::from_be_bytes([bytes[index], bytes[index + 1]]) as usize;
+            if segment_length < 2 || index + segment_length > bytes.len() {
+                break;
+            }
+            let is_start_of_frame = matches!(
+                marker,
+                0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf
+            );
+            if is_start_of_frame && segment_length >= 7 {
+                let height = u16::from_be_bytes([bytes[index + 3], bytes[index + 4]]) as u32;
+                let width = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u32;
+                return non_zero(width, height);
+            }
+            index += segment_length;
+        }
+    }
+
+    None
+}
+
 pub fn uses_imgpile_storage(storage: &str) -> bool {
     storage.trim().eq_ignore_ascii_case("imgpile")
 }

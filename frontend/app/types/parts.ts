@@ -12,6 +12,8 @@ export interface MessagePartMetadata extends Record<string, unknown> {
   fileId?: number | string | null;
   generatedImage?: boolean;
   storageProvider?: string;
+  width?: number;
+  height?: number;
 }
 
 interface BaseMessagePart {

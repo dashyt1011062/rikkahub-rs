@@ -141,6 +141,10 @@ pub struct UploadedFileDto {
     pub file_name: String,
     pub mime: String,
     pub size: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]

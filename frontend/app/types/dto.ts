@@ -24,6 +24,8 @@ export interface UploadedFileDto {
   fileName: string;
   mime: string;
   size: number;
+  width?: number;
+  height?: number;
 }
 
 export interface UploadFilesResponseDto {

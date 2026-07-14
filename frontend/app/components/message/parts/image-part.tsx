@@ -11,11 +11,18 @@ interface ImagePartProps {
 
 const LazyImagePreviewDialog = React.lazy(() => import("./image-preview-dialog"));
 
+function positiveDimension(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export function ImagePart({ url, metadata }: ImagePartProps) {
   const [error, setError] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const imageUrl = resolveManagedFileUrl(url, metadata);
+  const imageWidth = positiveDimension(metadata?.width);
+  const imageHeight = positiveDimension(metadata?.height);
+  const hasDimensions = imageWidth !== undefined && imageHeight !== undefined;
 
   React.useEffect(() => {
     setError(false);
@@ -36,9 +43,9 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
 
   return (
     <>
-      <div className={`relative my-2 max-w-md ${loaded ? "" : "min-h-48"}`}>
+      <div className={`relative my-2 max-w-md ${loaded || hasDimensions ? "" : "min-h-48"}`}>
         {!loaded && (
-          <div className="absolute inset-0 flex h-48 items-center justify-center rounded-md border border-muted bg-muted/30">
+          <div className="absolute inset-0 flex items-center justify-center rounded-md border border-muted bg-muted/30">
             <div className="text-sm text-muted-foreground">Loading image...</div>
           </div>
         )}
@@ -53,7 +60,13 @@ export function ImagePart({ url, metadata }: ImagePartProps) {
           loading="lazy"
           decoding="async"
           fetchPriority="auto"
-          style={{ maxHeight: "500px", width: "auto" }}
+          width={imageWidth}
+          height={imageHeight}
+          style={{
+            maxHeight: "500px",
+            width: "auto",
+            aspectRatio: hasDimensions ? `${imageWidth} / ${imageHeight}` : undefined,
+          }}
         />
       </div>
 

@@ -70,6 +70,7 @@ pub async fn upload(
                 state.config.upload_max_bytes / (1024 * 1024)
             )));
         }
+        let dimensions = file_storage::image_dimensions(&bytes);
         let stored = file_storage::store_bytes(
             &state,
             account.0.clone(),
@@ -84,6 +85,8 @@ pub async fn upload(
             file_name: stored.record.display_name,
             mime: mime_type,
             size: stored.record.size_bytes,
+            width: dimensions.map(|(width, _)| width),
+            height: dimensions.map(|(_, height)| height),
         });
     }
     if files.is_empty() {

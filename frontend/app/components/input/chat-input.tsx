@@ -99,7 +99,10 @@ function toMessagePart(file: UploadFilesResponseDto["files"][number]): UIMessage
     return {
       type: "image",
       url: file.url,
-      metadata: { fileId: file.id },
+      metadata: {
+        fileId: file.id,
+        ...(file.width && file.height ? { width: file.width, height: file.height } : {}),
+      },
     };
   }
 
