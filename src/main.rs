@@ -63,6 +63,7 @@ async fn main() -> AppResult<()> {
         .init();
 
     let config = Arc::new(AppConfig::from_env());
+    db::initialize_database(config.db_path.clone()).await?;
     let state = AppState {
         config: Arc::clone(&config),
         http: Client::builder()

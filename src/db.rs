@@ -7,8 +7,22 @@ use serde_json::Value;
 use tokio::task;
 use uuid::Uuid;
 
-use crate::config::DEFAULT_ASSISTANT_ID;
+use crate::config::{DEFAULT_ASSISTANT_ID, DEFAULT_WEB_ACCOUNT_ID};
 use crate::error::{AppError, AppResult};
+
+pub async fn initialize_database(db_path: PathBuf) -> AppResult<()> {
+    task::spawn_blocking(move || {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = open_or_create_connection(&db_path)?;
+        initialize_schema(&conn)?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("database initialization task failed: {error}")))?
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -972,11 +986,160 @@ pub async fn rebuild_message_search_index(db_path: PathBuf) -> AppResult<()> {
 }
 
 fn open_readonly(path: &PathBuf) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    configure_connection(&conn)?;
+    Ok(conn)
 }
 
 fn open_connection(path: &PathBuf) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    configure_connection(&conn)?;
+    Ok(conn)
+}
+
+fn open_or_create_connection(path: &PathBuf) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
+    configure_connection(&conn)?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    Ok(conn)
+}
+
+fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+}
+
+fn initialize_schema(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(&format!(
+        r#"
+        CREATE TABLE IF NOT EXISTS conversationentity (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL DEFAULT '{default_account_id}',
+            assistant_id TEXT NOT NULL DEFAULT '{default_assistant_id}',
+            title TEXT NOT NULL,
+            nodes TEXT NOT NULL DEFAULT '[]',
+            create_at INTEGER NOT NULL,
+            update_at INTEGER NOT NULL,
+            truncate_index INTEGER NOT NULL DEFAULT -1,
+            suggestions TEXT NOT NULL DEFAULT '[]',
+            is_pinned INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS message_node (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            node_index INTEGER NOT NULL,
+            messages TEXT NOT NULL,
+            select_index INTEGER NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversationentity(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL DEFAULT '{default_account_id}',
+            folder TEXT NOT NULL,
+            relative_path TEXT NOT NULL UNIQUE,
+            storage_provider TEXT NOT NULL DEFAULT 'local',
+            remote_url TEXT,
+            page_url TEXT,
+            delete_url TEXT,
+            thumbnail_url TEXT,
+            display_name TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memoryentity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL DEFAULT '{default_account_id}',
+            assistant_id TEXT NOT NULL,
+            content TEXT NOT NULL
+        );
+
+        "#,
+        default_account_id = DEFAULT_WEB_ACCOUNT_ID,
+        default_assistant_id = DEFAULT_ASSISTANT_ID,
+    ))?;
+
+    ensure_column(
+        conn,
+        "conversationentity",
+        "account_id",
+        &format!("TEXT NOT NULL DEFAULT '{DEFAULT_WEB_ACCOUNT_ID}'"),
+    )?;
+    ensure_column(
+        conn,
+        "managed_files",
+        "account_id",
+        &format!("TEXT NOT NULL DEFAULT '{DEFAULT_WEB_ACCOUNT_ID}'"),
+    )?;
+    ensure_column(conn, "managed_files", "storage_provider", "TEXT NOT NULL DEFAULT 'local'")?;
+    ensure_column(conn, "managed_files", "remote_url", "TEXT")?;
+    ensure_column(conn, "managed_files", "page_url", "TEXT")?;
+    ensure_column(conn, "managed_files", "delete_url", "TEXT")?;
+    ensure_column(conn, "managed_files", "thumbnail_url", "TEXT")?;
+    ensure_column(
+        conn,
+        "memoryentity",
+        "account_id",
+        &format!("TEXT NOT NULL DEFAULT '{DEFAULT_WEB_ACCOUNT_ID}'"),
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_message_node_conversation ON message_node(conversation_id);
+         CREATE INDEX IF NOT EXISTS idx_conversation_account_assistant ON conversationentity(account_id, assistant_id);
+         CREATE INDEX IF NOT EXISTS idx_conversation_account_order ON conversationentity(account_id, is_pinned DESC, update_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_managed_files_account_folder ON managed_files(account_id, folder);
+         CREATE INDEX IF NOT EXISTS idx_memoryentity_account_assistant ON memoryentity(account_id, assistant_id);",
+    )?;
+
+    let fts_trigram = conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(\
+            text,\
+            node_id UNINDEXED,\
+            message_id UNINDEXED,\
+            conversation_id UNINDEXED,\
+            title UNINDEXED,\
+            update_at UNINDEXED,\
+            tokenize = 'trigram'\
+        )",
+        [],
+    );
+    if fts_trigram.is_err() {
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(\
+                text,\
+                node_id UNINDEXED,\
+                message_id UNINDEXED,\
+                conversation_id UNINDEXED,\
+                title UNINDEXED,\
+                update_at UNINDEXED,\
+                tokenize = 'unicode61'\
+            )",
+            [],
+        )?;
+    }
+
+    ensure_message_favorite_table(conn)?;
+    ensure_pending_message_queue(conn)?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> AppResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+    Ok(())
 }
 
 fn read_conversation_list<I>(rows: I) -> rusqlite::Result<Vec<ConversationListDto>>
