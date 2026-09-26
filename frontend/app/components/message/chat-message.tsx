@@ -572,7 +572,7 @@ export const ChatMessage = React.memo(({
   const showActions = isLastMessage ? !loading : hasMessageContent;
 
   return (
-    <div className={cn("flex flex-col gap-4", isUser ? "items-end" : "items-start")}>
+    <div className={cn("group/message flex flex-col gap-3", isUser ? "items-end" : "items-start")}>
       <div className="flex w-full flex-col gap-2">
         <ChatMessageAvatarRow
           message={message}
@@ -586,8 +586,10 @@ export const ChatMessage = React.memo(({
         <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
           <div
             className={cn(
-              "flex flex-col gap-2 text-sm",
-              isUser ? "max-w-[85%] rounded-lg bg-muted px-4 py-3" : "w-full",
+              "flex min-w-0 flex-col gap-2 text-[15px] leading-relaxed",
+              isUser
+                ? "max-w-[85%] rounded-2xl rounded-tr-md bg-muted px-4 py-2.5 text-foreground"
+                : "w-full",
             )}
           >
             <MessageParts parts={message.parts} loading={loading} onToolApproval={onToolApproval} />
@@ -600,6 +602,14 @@ export const ChatMessage = React.memo(({
       <ChatMessageNerdLineRow message={message} alignRight={isUser} />
 
       {showActions && (
+        <div
+          className={cn(
+            "w-full transition-opacity duration-150",
+            // On hover-capable devices, older messages reveal their actions on hover/focus only.
+            !isLastMessage &&
+              "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/message:opacity-100 [@media(hover:hover)]:focus-within:opacity-100",
+          )}
+        >
         <ChatMessageActionsRow
           node={node}
           message={message}
@@ -620,6 +630,7 @@ export const ChatMessage = React.memo(({
           onFavorite={onFavorite}
           onFork={onFork}
         />
+        </div>
       )}
     </div>
   );

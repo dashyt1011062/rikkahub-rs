@@ -10,6 +10,8 @@ import { ControlledChainOfThoughtStep } from "../chain-of-thought";
 
 interface ReasoningStepPartProps {
   reasoning: UIReasoningPart;
+  /** Whether the owning message is still being generated. */
+  streaming?: boolean;
   isFirst?: boolean;
   isLast?: boolean;
 }
@@ -29,8 +31,15 @@ function formatDuration(createdAt?: string, finishedAt?: string | null): string 
   return `${seconds.toFixed(1)}s`;
 }
 
-export function ReasoningStepPart({ reasoning, isFirst, isLast }: ReasoningStepPartProps) {
-  const loading = reasoning.finishedAt == null;
+export function ReasoningStepPart({
+  reasoning,
+  streaming = false,
+  isFirst,
+  isLast,
+}: ReasoningStepPartProps) {
+  // Reasoning without finishedAt (older or imported messages) is only "thinking" while the
+  // message is actually streaming; otherwise it would pulse forever.
+  const loading = streaming && reasoning.finishedAt == null;
   const [expanded, setExpanded] = React.useState(false);
   const streamedReasoning = useThrottledValue(reasoning.reasoning, 120, loading);
 
@@ -38,7 +47,10 @@ export function ReasoningStepPart({ reasoning, isFirst, isLast }: ReasoningStepP
     setExpanded(nextExpanded);
   };
 
-  const duration = formatDuration(reasoning.createdAt, reasoning.finishedAt);
+  const duration =
+    loading || reasoning.finishedAt
+      ? formatDuration(reasoning.createdAt, reasoning.finishedAt)
+      : null;
 
   return (
     <ControlledChainOfThoughtStep

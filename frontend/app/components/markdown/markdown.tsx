@@ -9,7 +9,21 @@ export type MarkdownProps = {
   allowCodePreview?: boolean;
 };
 
-const RichMarkdown = React.lazy(() => import("./rich-markdown"));
+const loadRichMarkdown = () => import("./rich-markdown");
+const RichMarkdown = React.lazy(loadRichMarkdown);
+
+// Warm the renderer chunk once the page is idle, so the first reply after a page load doesn't
+// flash as raw markdown (the Suspense fallback) while the chunk is still downloading.
+if (typeof window !== "undefined") {
+  const preload = () => {
+    void loadRichMarkdown();
+  };
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(preload, { timeout: 3000 });
+  } else {
+    setTimeout(preload, 1500);
+  }
+}
 
 export default function Markdown(props: MarkdownProps) {
   return (

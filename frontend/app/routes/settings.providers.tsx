@@ -1593,8 +1593,9 @@ export default function SettingsProvidersPage() {
     const sourceRef = normalizeModelRef(sourceModel?.modelId);
     nextModel.abilities = ensureStringValues(nextModel.abilities);
     nextModel.inputModalities = normalizeModalityList(nextModel.inputModalities);
-    nextModel.outputModalities = normalizeModalityList(nextModel.outputModalities);
-    if (!getBoolean(nextModel.imageGenerationMode, false) || !nextModel.outputModalities.includes("IMAGE")) {
+    const outputModalities = normalizeModalityList(nextModel.outputModalities);
+    nextModel.outputModalities = outputModalities;
+    if (!getBoolean(nextModel.imageGenerationMode, false) || !outputModalities.includes("IMAGE")) {
       nextModel.imageGenerationMode = false;
     }
     nextModel.tools = normalizeToolList(nextModel.tools);

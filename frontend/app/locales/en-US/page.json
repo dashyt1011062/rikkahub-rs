@@ -58,7 +58,8 @@
       "default_name": "User"
     },
     "header": {
-      "select_conversation": "Select a conversation"
+      "select_conversation": "Select a conversation",
+      "new_chat": "New chat"
     }
   }
 }

@@ -58,7 +58,8 @@
       "default_name": "用户"
     },
     "header": {
-      "select_conversation": "请选择会话"
+      "select_conversation": "请选择会话",
+      "new_chat": "新对话"
     }
   }
 }

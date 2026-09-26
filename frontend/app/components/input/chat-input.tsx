@@ -698,10 +698,10 @@ export function ChatInput({
         className,
       )}
     >
-      <div className="w-full px-4 py-4">
+      <div className="w-full px-3 pt-2 pb-3 sm:px-6 sm:pb-4">
         <div
           className={cn(
-            "relative flex flex-col gap-2 rounded-lg border bg-muted/50 p-2 shadow-sm transition-shadow focus-within:shadow-md focus-within:ring-1 focus-within:ring-ring",
+            "relative flex flex-col gap-2 rounded-2xl border border-border/80 bg-background p-2 shadow-sm transition-[box-shadow,border-color] focus-within:border-ring/50 focus-within:shadow-md dark:bg-muted/40",
             dragActive && "border-primary/40 bg-primary/5 ring-2 ring-primary/30",
           )}
           onDragEnter={handleDragEnter}
@@ -836,7 +836,7 @@ export function ChatInput({
             onPaste={handlePaste}
             placeholder={placeholder}
             disabled={!ready || disabled}
-            className="min-h-[60px] max-h-[200px] resize-none border-0 bg-transparent dark:bg-transparent p-2 text-sm shadow-none focus-visible:ring-0"
+            className="min-h-[56px] max-h-[200px] resize-none border-0 bg-transparent px-2 py-1.5 text-base leading-relaxed shadow-none focus-visible:ring-0 md:text-sm dark:bg-transparent"
             rows={2}
           />
           <div className="flex items-center justify-between gap-2">

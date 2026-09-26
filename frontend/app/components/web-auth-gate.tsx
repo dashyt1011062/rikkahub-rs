@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 
+import Logo from "~/assets/logo.svg?react";
 import { extractErrorMessage } from "~/lib/error";
 import { onWebAuthRequired, requestWebAuthToken } from "~/services/api";
 import { Button } from "~/components/ui/button";
@@ -59,10 +60,13 @@ export function WebAuthGate() {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>{t("web_auth_gate.title")}</CardTitle>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-4 backdrop-blur-md animate-in fade-in-0 duration-200">
+      <Card className="w-full max-w-sm rounded-2xl shadow-xl animate-in zoom-in-95 fade-in-0 duration-200">
+        <CardHeader className="items-center text-center">
+          <div className="mx-auto mb-2 flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
+            <Logo aria-hidden className="size-7" />
+          </div>
+          <CardTitle className="text-lg">{t("web_auth_gate.title")}</CardTitle>
           <CardDescription>{t("web_auth_gate.description")}</CardDescription>
         </CardHeader>
         <CardContent>
@@ -90,7 +94,7 @@ export function WebAuthGate() {
               disabled={submitting}
             />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
-            <Button className="w-full" type="submit" disabled={submitting}>
+            <Button className="h-10 w-full" type="submit" disabled={submitting}>
               {submitting ? t("web_auth_gate.unlocking") : t("web_auth_gate.unlock")}
             </Button>
           </form>

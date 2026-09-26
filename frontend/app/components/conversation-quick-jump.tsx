@@ -19,8 +19,13 @@ export interface ConversationQuickJumpItem {
 
 interface ConversationNavigationProps {
   items: ConversationQuickJumpItem[];
+  /** Resolves a message preview on demand (tooltips only), so items can stay stable while streaming. */
+  getPreview?: (messageId: string) => string;
   showQuickJump?: boolean;
 }
+
+/** Minimum gap between anchor re-measurements triggered by content resizes and scrolling. */
+const MEASURE_INTERVAL_MS = 120;
 
 interface ConversationAnchorOffset extends ConversationQuickJumpItem {
   top: number;
@@ -297,15 +302,29 @@ function useConversationAnchorOffsets(items: ConversationQuickJumpItem[]) {
     const scrollElement = scrollRef.current;
     const contentElement = contentRef.current;
     let frameId: number | null = null;
+    let timerId: number | null = null;
+    let lastMeasuredAt = 0;
 
+    // Measuring forces layout; while streaming, content resizes and auto-scroll fire every frame,
+    // so coalesce to at most one measurement per MEASURE_INTERVAL_MS (trailing call included).
+    const measure = () => {
+      frameId = null;
+      lastMeasuredAt = performance.now();
+      rebuildAnchorOffsets();
+      syncActiveUserMessage();
+      scheduleJumpAlignment();
+    };
     const scheduleMeasurements = () => {
-      if (frameId !== null) return;
-      frameId = window.requestAnimationFrame(() => {
-        frameId = null;
-        rebuildAnchorOffsets();
-        syncActiveUserMessage();
-        scheduleJumpAlignment();
-      });
+      if (frameId !== null || timerId !== null) return;
+      const wait = lastMeasuredAt + MEASURE_INTERVAL_MS - performance.now();
+      if (wait > 0) {
+        timerId = window.setTimeout(() => {
+          timerId = null;
+          frameId = window.requestAnimationFrame(measure);
+        }, wait);
+        return;
+      }
+      frameId = window.requestAnimationFrame(measure);
     };
 
     scheduleMeasurements();
@@ -339,6 +358,9 @@ function useConversationAnchorOffsets(items: ConversationQuickJumpItem[]) {
       window.removeEventListener("resize", scheduleMeasurements);
       if (frameId !== null) {
         window.cancelAnimationFrame(frameId);
+      }
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
       }
     };
   }, [
@@ -420,7 +442,22 @@ type ConversationAnchorOffsetsController = ReturnType<typeof useConversationAnch
 
 interface ConversationQuickJumpProps {
   items: ConversationQuickJumpItem[];
+  getPreview?: (messageId: string) => string;
   controller: ConversationAnchorOffsetsController;
+}
+
+function QuickJumpPreview({
+  item,
+  getPreview,
+  emptyLabel,
+}: {
+  item: ConversationQuickJumpItem;
+  getPreview?: (messageId: string) => string;
+  emptyLabel: string;
+}) {
+  // Rendered only while the tooltip is open, so the preview is computed lazily and is current.
+  const preview = (getPreview ? getPreview(item.id) : item.preview)?.trim();
+  return <div>{preview || emptyLabel}</div>;
 }
 
 interface ConversationScrollControlsProps {
@@ -428,7 +465,7 @@ interface ConversationScrollControlsProps {
   controller: ConversationAnchorOffsetsController;
 }
 
-function ConversationQuickJump({ items, controller }: ConversationQuickJumpProps) {
+function ConversationQuickJump({ items, getPreview, controller }: ConversationQuickJumpProps) {
   const { t } = useTranslation();
   const { scrollRef, anchorOffsetsRef, rebuildAnchorOffsets, jumpToMessage } = controller;
   const [activeMessageId, setActiveMessageId] = React.useState<string | null>(null);
@@ -537,7 +574,11 @@ function ConversationQuickJump({ items, controller }: ConversationQuickJumpProps
                   <div className="text-[11px] text-background/75">
                     {index + 1}/{items.length} · {roleLabel}
                   </div>
-                  <div>{item.preview?.trim() || t("quick_jump.no_preview")}</div>
+                  <QuickJumpPreview
+                    item={item}
+                    getPreview={getPreview}
+                    emptyLabel={t("quick_jump.no_preview")}
+                  />
                 </div>
               </TooltipContent>
             </Tooltip>
@@ -685,16 +726,19 @@ function ConversationScrollControls({ items, controller }: ConversationScrollCon
   );
 }
 
-export function ConversationNavigation({
+export const ConversationNavigation = React.memo(function ConversationNavigation({
   items,
+  getPreview,
   showQuickJump = true,
 }: ConversationNavigationProps) {
   const controller = useConversationAnchorOffsets(items);
 
   return (
     <>
-      {showQuickJump ? <ConversationQuickJump items={items} controller={controller} /> : null}
+      {showQuickJump ? (
+        <ConversationQuickJump items={items} getPreview={getPreview} controller={controller} />
+      ) : null}
       <ConversationScrollControls items={items} controller={controller} />
     </>
   );
-}
+});

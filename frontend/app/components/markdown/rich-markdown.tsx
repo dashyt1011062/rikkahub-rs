@@ -23,6 +23,7 @@ const MATH_SYNTAX_REGEX = /\\\(|\\\[|(^|[^\\])\$\$?[\s\S]*?\$\$?/m;
 
 type RemarkPlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
 type RehypePlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
+type MarkdownComponents = NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>;
 
 type MathPlugins = {
   remark: RemarkPlugins[number];
@@ -122,76 +123,83 @@ export default function RichMarkdown({
     [allowCodePreview, t, workbench],
   );
 
+  // Stable component overrides: an inline object would give react-markdown new component types on
+  // every render, remounting every code block and link (and re-highlighting) on each streamed token.
+  const components = React.useMemo<MarkdownComponents>(
+    () => ({
+      pre: ({ children }) => <>{children}</>,
+      code: ({ className: codeClassName, children, ...props }) => {
+        const match = /language-([A-Za-z0-9_-]+)/.exec(codeClassName || "");
+        const code = String(children).replace(/\n$/, "");
+        const isBlock = code.includes("\n");
+
+        if (match || isBlock) {
+          const language = match?.[1] || "";
+          return (
+            <React.Suspense
+              fallback={
+                <div className="my-2 overflow-x-auto rounded-md border bg-muted/30 p-3 font-mono text-xs whitespace-pre">
+                  {code}
+                </div>
+              }
+            >
+              <LazyCodeBlock
+                language={language}
+                code={code}
+                onPreview={
+                  allowCodePreview && workbench
+                    ? () => {
+                        handlePreviewCode(language, code);
+                      }
+                    : undefined
+                }
+              />
+            </React.Suspense>
+          );
+        }
+
+        return (
+          <code className="inline-code" {...props}>
+            {children}
+          </code>
+        );
+      },
+      a: ({ href, children, ...props }) => {
+        const childText = typeof children === "string" ? children : "";
+
+        if (childText.startsWith("citation,")) {
+          const domain = childText.substring("citation,".length);
+          const id = href || "";
+
+          if (id.length === 6) {
+            return (
+              <span
+                className="citation-badge"
+                onClick={() => onClickCitation?.(id)}
+                title={domain}
+              >
+                {domain}
+              </span>
+            );
+          }
+        }
+
+        return (
+          <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+            {children}
+          </a>
+        );
+      },
+    }),
+    [allowCodePreview, handlePreviewCode, onClickCitation, workbench],
+  );
+
   return (
     <div className={cn("markdown", className)}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
-        components={{
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className: codeClassName, children, ...props }) => {
-            const match = /language-([A-Za-z0-9_-]+)/.exec(codeClassName || "");
-            const code = String(children).replace(/\n$/, "");
-            const isBlock = code.includes("\n");
-
-            if (match || isBlock) {
-              const language = match?.[1] || "";
-              return (
-                <React.Suspense
-                  fallback={
-                    <div className="my-2 overflow-x-auto rounded-md border bg-muted/30 p-3 font-mono text-xs whitespace-pre">
-                      {code}
-                    </div>
-                  }
-                >
-                  <LazyCodeBlock
-                    language={language}
-                    code={code}
-                    onPreview={
-                      allowCodePreview && workbench
-                        ? () => {
-                            handlePreviewCode(language, code);
-                          }
-                        : undefined
-                    }
-                  />
-                </React.Suspense>
-              );
-            }
-
-            return (
-              <code className="inline-code" {...props}>
-                {children}
-              </code>
-            );
-          },
-          a: ({ href, children, ...props }) => {
-            const childText = typeof children === "string" ? children : "";
-
-            if (childText.startsWith("citation,")) {
-              const domain = childText.substring("citation,".length);
-              const id = href || "";
-
-              if (id.length === 6) {
-                return (
-                  <span
-                    className="citation-badge"
-                    onClick={() => onClickCitation?.(id)}
-                    title={domain}
-                  >
-                    {domain}
-                  </span>
-                );
-              }
-            }
-
-            return (
-              <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-                {children}
-              </a>
-            );
-          },
-        }}
+        components={components}
       >
         {processedContent}
       </ReactMarkdown>

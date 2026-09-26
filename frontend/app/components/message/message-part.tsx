@@ -94,7 +94,10 @@ function renderContentPart(
       );
     case "reasoning":
       return (
-        <ReasoningFallbackPart reasoning={part.reasoning} isFinished={part.finishedAt != null} />
+        <ReasoningFallbackPart
+          reasoning={part.reasoning}
+          isFinished={!loading || part.finishedAt != null}
+        />
       );
     case "tool":
       return (
@@ -129,6 +132,7 @@ export const MessageParts = React.memo(({ parts, loading = false, onToolApproval
                     <ReasoningStepPart
                       key={stepKey}
                       reasoning={step.reasoning}
+                      streaming={loading}
                       isFirst={isFirst}
                       isLast={isLast}
                     />

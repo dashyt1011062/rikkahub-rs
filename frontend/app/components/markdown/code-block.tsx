@@ -288,6 +288,99 @@ export function highlightCode(
   return null;
 }
 
+interface HighlightedCode {
+  code: string;
+  tokenized: TokenizedCode;
+}
+
+function mergeHighlightedPrefix(
+  highlighted: HighlightedCode,
+  code: string,
+  rawTokens: TokenizedCode,
+): TokenizedCode {
+  const previousLines = highlighted.code.split("\n");
+  const nextLines = code.split("\n");
+  let common = 0;
+  // TextMate tokenization only flows forward, so identical leading lines keep identical tokens.
+  while (
+    common < previousLines.length &&
+    common < nextLines.length &&
+    previousLines[common] === nextLines[common] &&
+    common < highlighted.tokenized.tokens.length
+  ) {
+    common += 1;
+  }
+  if (common === 0) return rawTokens;
+  return {
+    bg: highlighted.tokenized.bg,
+    fg: highlighted.tokenized.fg,
+    tokens: [...highlighted.tokenized.tokens.slice(0, common), ...rawTokens.tokens.slice(common)],
+  };
+}
+
+type IdleCallback = () => void;
+
+const highlightQueue: IdleCallback[] = [];
+let highlightQueueScheduled = false;
+
+function requestIdle(callback: IdleCallback) {
+  if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+    window.requestIdleCallback(callback, { timeout: 200 });
+  } else {
+    setTimeout(callback, 16);
+  }
+}
+
+function runHighlightQueue() {
+  // One block per idle callback: each highlight triggers its own React commit (hundreds of token
+  // spans), so batching several blocks into one task would just move the jank to the commit.
+  highlightQueue.shift()?.();
+  if (highlightQueue.length > 0) {
+    requestIdle(runHighlightQueue);
+  } else {
+    highlightQueueScheduled = false;
+  }
+}
+
+/**
+ * Runs syntax highlighting in small idle-time slices instead of synchronously during render, so
+ * opening a conversation with many code blocks doesn't freeze the page.
+ */
+function enqueueHighlight(task: IdleCallback) {
+  highlightQueue.push(task);
+  if (!highlightQueueScheduled) {
+    highlightQueueScheduled = true;
+    requestIdle(runHighlightQueue);
+  }
+}
+
+/** Becomes true once the element is near the viewport, and stays true. */
+function useNearViewport(ref: React.RefObject<HTMLElement | null>): boolean {
+  const [near, setNear] = React.useState(false);
+
+  React.useEffect(() => {
+    if (near) return;
+    const element = ref.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setNear(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setNear(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "800px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [near, ref]);
+
+  return near;
+}
+
 const LINE_NUMBER_CLASSES = cn(
   "block",
   "before:mr-4",
@@ -424,36 +517,42 @@ export function CodeBlockContent({
   language: BundledLanguage | null;
   showLineNumbers?: boolean;
 }) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
   const rawTokens = React.useMemo(() => createRawTokens(code), [code]);
   const shouldHighlight = Boolean(language) && code.length <= MAX_SHIKI_CODE_LENGTH;
+  const nearViewport = useNearViewport(containerRef);
 
-  const [tokenized, setTokenized] = React.useState<TokenizedCode>(() => {
-    if (!shouldHighlight || !language) {
-      return rawTokens;
-    }
-
-    return highlightCode(code, language) ?? rawTokens;
+  // Only already-computed tokens are used during render; tokenizing happens in idle time below.
+  const [highlighted, setHighlighted] = React.useState<HighlightedCode | null>(() => {
+    if (!shouldHighlight || !language) return null;
+    const cached = readTokensFromCache(getTokensCacheKey(code, language));
+    return cached ? { code, tokenized: cached } : null;
   });
 
   React.useEffect(() => {
-    if (!shouldHighlight || !language) {
-      setTokenized(rawTokens);
+    if (!shouldHighlight || !language || !nearViewport) return;
+
+    const tokensCacheKey = getTokensCacheKey(code, language);
+    const cached = readTokensFromCache(tokensCacheKey);
+    if (cached) {
+      setHighlighted({ code, tokenized: cached });
       return;
     }
 
     let cancelled = false;
-    const tokensCacheKey = getTokensCacheKey(code, language);
     const onHighlighted = (result: TokenizedCode) => {
       if (!cancelled) {
-        setTokenized(result);
+        setHighlighted({ code, tokenized: result });
       }
     };
 
-    const nextTokenized = highlightCode(code, language, onHighlighted);
-    if (nextTokenized) {
-      setTokenized(nextTokenized);
-    }
-    // If null (async loading), keep previous tokenized state to avoid flash
+    enqueueHighlight(() => {
+      if (cancelled) return;
+      const nextTokenized = highlightCode(code, language, onHighlighted);
+      if (nextTokenized) {
+        setHighlighted({ code, tokenized: nextTokenized });
+      }
+    });
 
     return () => {
       cancelled = true;
@@ -463,10 +562,19 @@ export function CodeBlockContent({
         subscribers.delete(tokensCacheKey);
       }
     };
-  }, [code, language, rawTokens, shouldHighlight]);
+  }, [code, language, nearViewport, shouldHighlight]);
+
+  // Raw and highlighted tokens share the same line structure, so switching never shifts layout.
+  // While code is still changing (streaming), reuse highlighted tokens for the unchanged leading
+  // lines and show only the changed tail as plain text until the next highlight lands.
+  const tokenized = React.useMemo(() => {
+    if (!shouldHighlight || !highlighted) return rawTokens;
+    if (highlighted.code === code) return highlighted.tokenized;
+    return mergeHighlightedPrefix(highlighted, code, rawTokens);
+  }, [code, highlighted, rawTokens, shouldHighlight]);
 
   return (
-    <div className="code-block-content relative overflow-auto">
+    <div ref={containerRef} className="code-block-content relative overflow-auto">
       <CodeBlockBody
         className="dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)]"
         showLineNumbers={showLineNumbers}

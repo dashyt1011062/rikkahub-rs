@@ -4,6 +4,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import {
   ConversationNavigation,
+  type ConversationQuickJumpItem,
   getConversationMessageAnchorId,
 } from "~/components/conversation-quick-jump";
 import { ConversationSidebar } from "~/components/conversation-sidebar";
@@ -23,6 +24,8 @@ import { useIsMobile } from "~/hooks/use-mobile";
 import { toConversationSummaryUpdate, useConversationList } from "~/hooks/use-conversation-list";
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
 import { getAssistantDisplayName } from "~/lib/display";
+import { UIAvatar } from "~/components/ui/ui-avatar";
+import { structuralShare } from "~/lib/structural-share";
 import { cn } from "~/lib/utils";
 import api, { sse } from "~/services/api";
 import { useChatInputStore } from "~/stores";
@@ -787,9 +790,17 @@ function useConversationDetail(activeId: string | null, updateSummary: Conversat
         return;
       }
 
-      detailRef.current = nextDetail;
-      setDetail(nextDetail);
-      updateSummary(toConversationSummaryUpdate(nextDetail));
+      // Snapshots re-send every node as new objects; keep unchanged nodes/messages identical so
+      // memoized messages don't re-render (and re-parse their markdown) on every snapshot.
+      const sharedDetail =
+        currentDetail && currentDetail.id === nextDetail.id
+          ? structuralShare(currentDetail, nextDetail)
+          : nextDetail;
+      if (sharedDetail === currentDetail) return;
+
+      detailRef.current = sharedDetail;
+      setDetail(sharedDetail);
+      updateSummary(toConversationSummaryUpdate(sharedDetail));
     },
     [updateSummary],
   );
@@ -1302,14 +1313,30 @@ const ConversationTimeline = React.memo(({
   }, [selectedNodeMessages]);
   const canQuickJump =
     Boolean(activeId) && !detailLoading && !detailError && timelineItems.length > 1;
-  const quickJumpItems = React.useMemo(
-    () =>
-      timelineItems.map(({ message }) => ({
-        id: message.id,
-        role: message.role,
-        preview: getQuickJumpPreview(message, t),
-      })),
-    [t, timelineItems],
+  // Quick-jump items only change when messages are added/removed, not on every streamed token;
+  // previews are resolved lazily (when a tooltip opens) from the latest timeline.
+  const quickJumpItemsRef = React.useRef<ConversationQuickJumpItem[]>([]);
+  const quickJumpItems = React.useMemo(() => {
+    const previous = quickJumpItemsRef.current;
+    const unchanged =
+      previous.length === timelineItems.length &&
+      timelineItems.every(
+        ({ message }, index) =>
+          previous[index]?.id === message.id && previous[index]?.role === message.role,
+      );
+    if (unchanged) return previous;
+    const next = timelineItems.map(({ message }) => ({ id: message.id, role: message.role }));
+    quickJumpItemsRef.current = next;
+    return next;
+  }, [timelineItems]);
+  const timelineItemsRef = React.useRef(timelineItems);
+  timelineItemsRef.current = timelineItems;
+  const getQuickJumpItemPreview = React.useCallback(
+    (messageId: string) => {
+      const item = timelineItemsRef.current.find(({ message }) => message.id === messageId);
+      return item ? getQuickJumpPreview(item.message, t) : "";
+    },
+    [t],
   );
   const assistant = React.useMemo(() => {
     if (!settings || !conversationAssistantId) return null;
@@ -1384,7 +1411,11 @@ const ConversationTimeline = React.memo(({
   return (
     <Conversation className="flex-1 min-h-0">
       <ConversationContent
-        className={cn("w-full gap-4 px-4 py-6", canQuickJump && "lg:pr-16", contentClassName)}
+        className={cn(
+          "mx-auto w-full max-w-3xl gap-4 px-4 py-6 sm:px-6",
+          canQuickJump && "lg:pr-12",
+          contentClassName,
+        )}
       >
         {!activeId && !isHomeRoute && (
           <ConversationEmptyState
@@ -1483,7 +1514,11 @@ const ConversationTimeline = React.memo(({
           ))}
       </ConversationContent>
 
-      <ConversationNavigation items={quickJumpItems} showQuickJump={canQuickJump} />
+      <ConversationNavigation
+        items={quickJumpItems}
+        getPreview={getQuickJumpItemPreview}
+        showQuickJump={canQuickJump}
+      />
     </Conversation>
   );
 });
@@ -2139,9 +2174,20 @@ function ConversationsPageInner() {
     }
   }, [hasWorkbenchPanel, isMobile]);
 
+  // While switching, `detail` still holds the previous conversation; only trust it once it matches.
+  const activeDetail = detail && detail.id === activeId ? detail : null;
+  const activeTitle = (
+    activeDetail?.title ??
+    conversations.find((conversation) => conversation.id === activeId)?.title ??
+    ""
+  ).trim();
+
   const chatContent = (
     <div
-      className={cn("flex flex-1 min-h-0 flex-col overflow-hidden", isNewChat && "justify-end")}
+      className={cn(
+        "flex flex-1 min-h-0 flex-col overflow-hidden",
+        isNewChat && "md:justify-center md:pb-[12vh]",
+      )}
     >
       {!isNewChat && (
         <div className="relative flex min-h-0 flex-1">
@@ -2171,12 +2217,28 @@ function ConversationsPageInner() {
         </div>
       )}
 
-      <div>
-        {isNewChat ? (
-          <div className="mb-4 text-center">
-            <p className="text-lg text-muted-foreground">{t("conversations.welcome_prompt")}</p>
+      {isNewChat ? (
+        <div className="flex flex-1 items-center justify-center md:flex-none">
+          <div className="mb-2 flex flex-col items-center gap-3 px-6 text-center animate-in fade-in-0 slide-in-from-bottom-2 duration-500">
+            <UIAvatar
+              size="lg"
+              name={currentAssistant?.name || t("conversations.user.default_name")}
+              avatar={currentAssistant?.avatar}
+              className="size-12 shadow-sm ring-4 ring-muted/60"
+            />
+            <div className="space-y-1">
+              {currentAssistant?.name ? (
+                <p className="text-sm font-medium text-muted-foreground">{currentAssistant.name}</p>
+              ) : null}
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                {t("conversations.welcome_prompt")}
+              </h1>
+            </div>
           </div>
-        ) : null}
+        </div>
+      ) : null}
+
+      <div className="mx-auto w-full max-w-3xl">
         <ChatInput
           value={inputText}
           attachments={inputAttachments}
@@ -2238,7 +2300,22 @@ function ConversationsPageInner() {
         webAuthEnabled={settings?.webServerJwtEnabled === true}
       />
       <SidebarInset className="relative flex min-h-svh flex-col overflow-hidden">
-        <SidebarTrigger className="absolute top-3 left-3 z-30 size-8 rounded-full border bg-background/85 shadow-sm backdrop-blur hover:bg-background" />
+        <header className="z-30 flex h-12 shrink-0 items-center gap-2 border-b border-border/60 bg-background/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/65 sm:px-3">
+          <SidebarTrigger className="size-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground" />
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-sm font-medium text-foreground/90">
+              {isNewChat || !activeId
+                ? t("conversations.header.new_chat")
+                : activeTitle || t("common:conversation_sidebar.unnamed_conversation")}
+            </h2>
+          </div>
+          {!isNewChat && activeId && activeDetail?.isGenerating ? (
+            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground">
+              <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+              {t("common:conversation_sidebar.generating")}
+            </span>
+          ) : null}
+        </header>
         {!isMobile ? (
           <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
             <ResizablePanel
