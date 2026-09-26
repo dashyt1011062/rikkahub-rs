@@ -1667,3 +1667,99 @@ struct ConversationRow {
     create_at: i64,
     update_at: i64,
 }
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryDto {
+    pub id: i64,
+    pub assistant_id: String,
+    pub content: String,
+}
+
+pub async fn list_memories(db_path: PathBuf, account_id: String, assistant_id: String) -> AppResult<Vec<MemoryDto>> {
+    task::spawn_blocking(move || {
+        let conn = open_readonly(&db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, assistant_id, content
+             FROM memoryentity
+             WHERE account_id = ?1 AND assistant_id = ?2
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![account_id, assistant_id], row_to_memory)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<Vec<MemoryDto>, AppError>(rows)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("memory list task failed: {error}")))?
+}
+
+pub async fn insert_memory(
+    db_path: PathBuf,
+    account_id: String,
+    assistant_id: String,
+    content: String,
+) -> AppResult<MemoryDto> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        conn.execute(
+            "INSERT INTO memoryentity (account_id, assistant_id, content) VALUES (?1, ?2, ?3)",
+            params![account_id, assistant_id, content],
+        )?;
+        Ok::<MemoryDto, AppError>(MemoryDto {
+            id: conn.last_insert_rowid(),
+            assistant_id,
+            content,
+        })
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("memory insert task failed: {error}")))?
+}
+
+pub async fn update_memory(
+    db_path: PathBuf,
+    account_id: String,
+    id: i64,
+    content: String,
+) -> AppResult<MemoryDto> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        let updated = conn.execute(
+            "UPDATE memoryentity SET content = ?1 WHERE id = ?2 AND account_id = ?3",
+            params![content, id, account_id],
+        )?;
+        if updated == 0 {
+            return Err(AppError::not_found("Memory not found"));
+        }
+        conn.query_row(
+            "SELECT id, assistant_id, content FROM memoryentity WHERE id = ?1 AND account_id = ?2",
+            params![id, account_id],
+            row_to_memory,
+        )
+        .map_err(AppError::from)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("memory update task failed: {error}")))?
+}
+
+pub async fn delete_memory(db_path: PathBuf, account_id: String, id: i64) -> AppResult<bool> {
+    task::spawn_blocking(move || {
+        let conn = open_connection(&db_path)?;
+        Ok::<bool, AppError>(
+            conn.execute(
+                "DELETE FROM memoryentity WHERE id = ?1 AND account_id = ?2",
+                params![id, account_id],
+            )? > 0,
+        )
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("memory delete task failed: {error}")))?
+}
+
+fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryDto> {
+    Ok(MemoryDto {
+        id: row.get(0)?,
+        assistant_id: row.get(1)?,
+        content: row.get(2)?,
+    })
+}

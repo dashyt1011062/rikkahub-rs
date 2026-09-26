@@ -283,7 +283,20 @@ pub async fn detail_stream(
                     yield Ok(Event::default().event("error").data(payload.to_string()));
                 }
                 Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                // Missed events (slow client): resync with a fresh snapshot instead of leaving the
+                // client on stale content or a stuck "generating" state.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Ok(mut conversation) = db::get_conversation(db_path.clone(), account_id.clone(), id.clone()).await {
+                        conversation.is_generating = engine.is_generating(&account_id, &id).await;
+                        let payload = json!({
+                            "type": "snapshot",
+                            "seq": seq,
+                            "conversation": conversation,
+                        });
+                        seq += 1;
+                        yield Ok(Event::default().event("snapshot").data(payload.to_string()));
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -310,7 +323,15 @@ pub async fn list_stream(
                     yield Ok(Event::default().event("invalidate").data(payload.to_string()));
                 }
                 Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                // Missed events: the assistant is unknown, so ask the client to refetch its list.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let payload = json!({
+                        "type": "invalidate",
+                        "assistantId": Value::Null,
+                        "timestamp": db::now_millis(),
+                    });
+                    yield Ok(Event::default().event("invalidate").data(payload.to_string()));
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -441,6 +462,7 @@ pub async fn stop(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     state.engine.stop_generation(&state, &account.0, &id).await;
+    engine::spawn_title_after_interruption(&state, account.0, id);
     Ok(Json(json!({ "status": "stopped" })))
 }
 

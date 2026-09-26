@@ -1,5 +1,5 @@
 use axum::middleware;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 
 use crate::auth;
@@ -9,6 +9,7 @@ mod auth_routes;
 mod ai_icon_routes;
 mod conversation_routes;
 mod file_routes;
+mod memory_routes;
 mod migration_routes;
 mod settings_routes;
 mod system_routes;
@@ -64,9 +65,17 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/files/id/:id", get(file_routes::by_id))
         .route("/files/path/*path", get(file_routes::by_path))
         .route("/files/upload", post(file_routes::upload))
+        .route("/memory", get(memory_routes::list).post(memory_routes::create))
+        .route("/memory/:id", put(memory_routes::update).delete(memory_routes::delete))
         .route("/migration/export", get(migration_routes::export_backup))
         .route("/migration/import", post(migration_routes::import_backup))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
-    public.merge(protected)
+    public.merge(protected).fallback(api_not_found)
+}
+
+/// Unknown API paths get a JSON 404 instead of falling through to the SPA's index.html
+/// (which clients would then fail to parse as JSON).
+async fn api_not_found() -> crate::error::AppError {
+    crate::error::AppError::not_found("API route not found")
 }

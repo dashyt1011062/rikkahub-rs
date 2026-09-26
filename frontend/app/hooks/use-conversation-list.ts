@@ -167,7 +167,9 @@ export function useConversationList({
       {
         onMessage: ({ event, data }) => {
           if (event !== "invalidate") return;
-          if (data.assistantId !== currentAssistantIdRef.current) return;
+          // A null assistantId (server-side resync after missed events) refreshes any list.
+          if (data.assistantId != null && data.assistantId !== currentAssistantIdRef.current)
+            return;
           scheduleListRefresh();
         },
         onError: (streamError) => {

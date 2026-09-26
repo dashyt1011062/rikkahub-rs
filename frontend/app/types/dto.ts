@@ -34,7 +34,7 @@ export interface UploadFilesResponseDto {
 
 export interface ConversationListInvalidateEventDto {
   type: "invalidate";
-  assistantId: string;
+  assistantId: string | null;
   timestamp: number;
 }
 

@@ -30,12 +30,17 @@ impl EngineState {
             .contains_key(&job_key(account_id, conversation_id))
     }
 
-    async fn insert_job(&self, account_id: &str, conversation_id: &str, handle: JoinHandle<()>) {
+    /// Spawns `task` while holding the job map lock, so the task cannot finish and call
+    /// `remove_job` before its handle is registered (which would leave it "generating" forever).
+    async fn spawn_job<F>(&self, account_id: &str, conversation_id: &str, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let mut jobs = self.generation_jobs.lock().await;
-        if let Some(existing) = jobs.remove(&job_key(account_id, conversation_id)) {
+        let handle = tokio::spawn(task);
+        if let Some(existing) = jobs.insert(job_key(account_id, conversation_id), handle) {
             existing.abort();
         }
-        jobs.insert(job_key(account_id, conversation_id), handle);
     }
 
     pub async fn stop_generation(&self, state: &AppState, account_id: &str, conversation_id: &str) {
@@ -370,7 +375,7 @@ pub async fn start_generation(state: AppState, account_id: String, conversation_
     let task_state = state.clone();
     let task_account = account_id.clone();
     let task_conversation = conversation_id.clone();
-    let handle = tokio::spawn(async move {
+    let task = async move {
         task_state.events.emit(AppEvent::ConversationChanged {
             account_id: task_account.clone(),
             conversation_id: task_conversation.clone(),
@@ -381,6 +386,7 @@ pub async fn start_generation(state: AppState, account_id: String, conversation_
                 conversation_id: task_conversation.clone(),
                 message: error.message,
             });
+            spawn_title_after_interruption(&task_state, task_account.clone(), task_conversation.clone());
         }
         task_state.engine.remove_job(&task_account, &task_conversation).await;
         task_state.events.emit(AppEvent::ConversationChanged {
@@ -388,8 +394,8 @@ pub async fn start_generation(state: AppState, account_id: String, conversation_
             conversation_id: task_conversation.clone(),
         });
         spawn_next_pending_message(task_state.clone(), task_account, task_conversation);
-    });
-    state.engine.insert_job(&account_id, &conversation_id, handle).await;
+    };
+    state.engine.spawn_job(&account_id, &conversation_id, task).await;
     state.events.emit(AppEvent::ConversationChanged {
         account_id,
         conversation_id,
@@ -513,11 +519,16 @@ async fn upsert_assistant_message(
         conversation_id.to_string(),
     )
     .await?;
-    let parts = if finished {
+    let mut parts = if finished {
         llm::store_generated_images(state, account_id, result.parts).await?
     } else {
         result.parts
     };
+    let previous_message = stream_node_id
+        .as_ref()
+        .and_then(|node_id| conversation.messages.iter().find(|node| &node.id == node_id))
+        .and_then(|node| node.messages.get(node.select_index.max(0) as usize));
+    stamp_reasoning_parts(&mut parts, previous_message, finished);
     let now = db::now_millis();
     let node = if stream_node_id.is_none() {
         let node_id = db::random_id();
@@ -605,6 +616,51 @@ async fn upsert_assistant_message(
     }
 
     Ok(conversation)
+}
+
+fn is_reasoning_part(part: &Value) -> bool {
+    part.get("type").and_then(Value::as_str) == Some("reasoning")
+}
+
+/// Stamps reasoning parts with `createdAt`/`finishedAt`: the web UI treats reasoning without
+/// `finishedAt` as still thinking and uses both for the displayed duration. Timestamps carry over
+/// from the previously stored version of the streaming message; reasoning counts as finished once
+/// later content (text, tool call, ...) appears or the message itself is finished.
+fn stamp_reasoning_parts(parts: &mut [Value], previous: Option<&db::MessageDto>, finished: bool) {
+    let previous_reasoning = previous
+        .map(|message| message.parts.iter().filter(|part| is_reasoning_part(part)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let now = db::now_iso();
+    let mut reasoning_index = 0;
+    for index in 0..parts.len() {
+        if !is_reasoning_part(&parts[index]) {
+            continue;
+        }
+        let has_later_content = parts[index + 1..].iter().any(|part| !is_reasoning_part(part));
+        let previous_part = previous_reasoning.get(reasoning_index).copied();
+        reasoning_index += 1;
+        let Some(object) = parts[index].as_object_mut() else {
+            continue;
+        };
+        if object.get("createdAt").map_or(true, Value::is_null) {
+            let created_at = previous_part
+                .and_then(|part| part.get("createdAt"))
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or_else(|| Value::String(now.clone()));
+            object.insert("createdAt".to_string(), created_at);
+        }
+        if object.get("finishedAt").map_or(true, Value::is_null) {
+            if let Some(finished_at) = previous_part
+                .and_then(|part| part.get("finishedAt"))
+                .filter(|value| !value.is_null())
+            {
+                object.insert("finishedAt".to_string(), finished_at.clone());
+            } else if finished || has_later_content {
+                object.insert("finishedAt".to_string(), Value::String(now.clone()));
+            }
+        }
+    }
 }
 
 async fn execute_auto_tools(
@@ -702,6 +758,16 @@ async fn execute_auto_tools(
     db::upsert_conversation(state.config.db_path.clone(), account_id.to_string(), conversation.clone()).await?;
     emit_changed(state, account_id, conversation);
     Ok(true)
+}
+
+/// Titles are normally generated after a successful reply; a stopped or failed generation would
+/// otherwise leave the conversation untitled for good. Best effort (falls back to the first user
+/// message when the model can't produce a title), so errors are not reported.
+pub fn spawn_title_after_interruption(state: &AppState, account_id: String, conversation_id: String) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _ = generate_and_store_title(state, account_id, conversation_id, false).await;
+    });
 }
 
 async fn start_title_generation(state: AppState, account_id: String, conversation_id: String, force: bool) {
