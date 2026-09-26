@@ -962,11 +962,12 @@ fn select_model_ref(settings: &Value, assistant_id: &str, model_ref_override: Op
         .unwrap_or_else(|| json!({}));
     let model_id = match model_ref_override.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) if !value.eq_ignore_ascii_case("auto") => value,
-        _ => assistant
-            .get("chatModelId")
-            .or_else(|| settings.get("chatModelId"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty() && *value != "auto")
+        // An assistant without its own model (missing, null, empty or "auto") uses the global chat model.
+        _ => [assistant.get("chatModelId"), settings.get("chatModelId")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find(|value| !value.trim().is_empty() && *value != "auto")
             .ok_or_else(|| AppError::bad_request("No chat model selected"))?,
     };
 

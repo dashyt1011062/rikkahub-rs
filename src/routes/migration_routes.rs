@@ -16,6 +16,7 @@ use crate::auth::AccountId;
 use crate::config::DEFAULT_WEB_ACCOUNT_ID;
 use crate::db;
 use crate::error::{AppError, AppResult};
+use crate::settings_store;
 use crate::AppState;
 
 const BACKUP_MAX_BYTES: usize = 512 * 1024 * 1024;
@@ -25,6 +26,8 @@ pub async fn export_backup(
     State(state): State<AppState>,
 ) -> AppResult<Response<Body>> {
     ensure_primary_account(&account.0)?;
+    // Creates default settings.json when the account has none yet, so the backup can be built.
+    settings_store::read_settings(&state.config, &account.0).await?;
     let data_dir = state.config.data_dir.clone();
     let db_path = state.config.db_path.clone();
     let bytes = task::spawn_blocking(move || build_backup_zip(&data_dir, &db_path))
@@ -189,6 +192,9 @@ fn apply_backup_zip(data_dir: &Path, db_path: &Path, bytes: Vec<u8>) -> AppResul
                 delete_directory(&data_dir.join("accounts"))?;
                 copy_directory(&import_root.join("accounts"), &data_dir.join("accounts"))?;
             }
+            // Backups (e.g. from the Android app) may lack the columns, indexes and FTS table
+            // this backend relies on; migrate before anything queries the imported database.
+            db::initialize_database_blocking(db_path)?;
             Ok(())
         })();
 

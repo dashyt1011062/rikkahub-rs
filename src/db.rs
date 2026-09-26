@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, OpenFlags};
@@ -11,17 +11,20 @@ use crate::config::{DEFAULT_ASSISTANT_ID, DEFAULT_WEB_ACCOUNT_ID};
 use crate::error::{AppError, AppResult};
 
 pub async fn initialize_database(db_path: PathBuf) -> AppResult<()> {
-    task::spawn_blocking(move || {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    task::spawn_blocking(move || initialize_database_blocking(&db_path))
+        .await
+        .map_err(|error| AppError::internal(format!("database initialization task failed: {error}")))?
+}
 
-        let conn = open_or_create_connection(&db_path)?;
-        initialize_schema(&conn)?;
-        Ok::<(), AppError>(())
-    })
-    .await
-    .map_err(|error| AppError::internal(format!("database initialization task failed: {error}")))?
+/// Creates the database if needed and migrates its schema (tables, columns, indexes, FTS)
+/// to what this backend expects. Also used after importing a backup database.
+pub fn initialize_database_blocking(db_path: &Path) -> AppResult<()> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let conn = open_or_create_connection(db_path)?;
+    initialize_schema(&conn)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -336,8 +339,13 @@ pub async fn search_conversations(
         let conn = open_readonly(&db_path)?;
         let title_matches = search_conversation_titles(&conn, &account_id, &assistant_id, &query, limit)?;
         let content_limit = (limit.saturating_mul(5)).clamp(limit, 500);
-        let content_matches = search_conversation_content(&conn, &account_id, &assistant_id, &query, content_limit)
-            .or_else(|_| search_conversation_content_like(&conn, &account_id, &assistant_id, &query, content_limit))?;
+        // The trigram FTS index cannot match terms shorter than 3 characters (common for Chinese
+        // queries such as "天气"), so those go straight to the LIKE scan.
+        let content_matches = match fts_match_query(&query) {
+            Some(fts_query) => search_conversation_content(&conn, &account_id, &assistant_id, &fts_query, content_limit)
+                .or_else(|_| search_conversation_content_like(&conn, &account_id, &assistant_id, &query, content_limit))?,
+            None => search_conversation_content_like(&conn, &account_id, &assistant_id, &query, content_limit)?,
+        };
 
         let mut merged = std::collections::HashMap::<String, ConversationSearchResultDto>::new();
         for item in title_matches.into_iter().chain(content_matches) {
@@ -997,7 +1005,7 @@ fn open_connection(path: &PathBuf) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn open_or_create_connection(path: &PathBuf) -> rusqlite::Result<Connection> {
+fn open_or_create_connection(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
@@ -1611,11 +1619,42 @@ fn search_conversation_content_like(
     rows.collect::<Result<Vec<_>, _>>()
 }
 
+/// Builds an FTS5 query that ANDs every whitespace-separated term as a quoted phrase, so user
+/// input containing FTS syntax (`-`, `:`, `"`, `*`, ...) cannot break the query. Returns `None`
+/// when a term is too short for the trigram tokenizer to match.
+fn fts_match_query(query: &str) -> Option<String> {
+    let terms = query.split_whitespace().collect::<Vec<_>>();
+    if terms.is_empty() || terms.iter().any(|term| term.chars().count() < 3) {
+        return None;
+    }
+    Some(
+        terms
+            .iter()
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Snippet around `query` taken from the text of the stored messages JSON (not the raw JSON),
+/// preferring the message that contains the query.
 fn make_snippet(raw: &str, query: &str) -> String {
-    let haystack = raw.replace(['\n', '\r', '\t'], " ");
-    let start = haystack.find(query).unwrap_or(0).saturating_sub(40);
-    let end = (start + 160).min(haystack.len());
-    haystack.get(start..end).unwrap_or(&haystack).to_string()
+    let texts = parse_messages(raw)
+        .iter()
+        .map(extract_message_search_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    let Some(text) = texts.iter().find(|text| text.contains(query)).or_else(|| texts.first()) else {
+        return String::new();
+    };
+    let haystack = text.replace(['\n', '\r', '\t'], " ");
+    let match_at = haystack.find(query).unwrap_or(0);
+    let chars_before = haystack[..match_at].chars().count();
+    haystack
+        .chars()
+        .skip(chars_before.saturating_sub(40))
+        .take(160)
+        .collect()
 }
 
 struct ConversationRow {
